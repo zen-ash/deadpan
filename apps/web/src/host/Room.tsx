@@ -1,5 +1,5 @@
-// The big screen's noir interrogation room: a dark room with blinds on the wall, one swinging
-// lamp, and a neon face per suspect. Faces are placed from screen-space slots (layout.ts), so
+// The big screen's noir interrogation room: a dark room with golden light through blinds on the
+// wall, one swinging lamp, and a glowing face per suspect. Faces are placed from screen-space slots (layout.ts), so
 // they always fit the free area next to the overlay. The lamp idles in the lobby, follows whoever
 // is questioned, sweeps across everyone during the drumroll, and lands on the accused.
 import type { AnswerResult, PlayerInfo } from '@deadpan/shared';
@@ -26,10 +26,14 @@ const FOV = 34;
 
 export interface SuspectView {
   player: PlayerInfo;
+  /** Colours the face; the card shows it too (the round's mean once revealed). */
   drift: number | null;
   lastAnswer?: AnswerResult;
-  badge?: 'accused' | 'imposter' | 'both';
   benched?: boolean;
+  /** After the reveal. */
+  role?: 'imposter' | 'innocent';
+  /** The stamp on the card's corner after the reveal. */
+  stamp?: 'caught' | 'accused' | 'escaped';
 }
 
 interface RoomProps {
@@ -65,8 +69,8 @@ function usePlacements(slots: Slot[]): Placement[] {
 export function Room(props: RoomProps) {
   return (
     <Canvas className="room-canvas" shadows dpr={[1, 2]} gl={{ antialias: false }} camera={{ position: [0, CAM_Y, CAM_Z], fov: FOV }}>
-      <color attach="background" args={['#040507']} />
-      <fog attach="fog" args={['#040507', 9, 20]} />
+      <color attach="background" args={['#07080b']} />
+      <fog attach="fog" args={['#07080b', 9, 20]} />
       <Scene {...props} />
       <EffectComposer multisampling={4}>
         <Bloom mipmapBlur intensity={1.3} luminanceThreshold={0.25} luminanceSmoothing={0.3} />
@@ -90,7 +94,7 @@ function Scene({ suspects, slots, focus, activeId, calibrating }: RoomProps) {
   return (
     <>
       <ambientLight intensity={0.05} />
-      <hemisphereLight args={['#2a3550', '#050608', 0.25]} />
+      <hemisphereLight args={['#2a2f3c', '#050608', 0.25]} />
       <Walls />
       <Blinds />
       <Lamp
@@ -118,7 +122,7 @@ function Walls() {
     <>
       <mesh position={[0, 3, -3.2]} receiveShadow>
         <planeGeometry args={[60, 20]} />
-        <meshStandardMaterial color="#171a21" roughness={1} />
+        <meshStandardMaterial color="#14171e" roughness={1} />
       </mesh>
       <mesh rotation-x={-Math.PI / 2} position={[0, -2.2, 0]} receiveShadow>
         <planeGeometry args={[60, 60]} />
@@ -128,7 +132,7 @@ function Walls() {
   );
 }
 
-/** Cool light through window blinds, striping the back wall. */
+/** Warm light through window blinds, striping the back wall. */
 function Blinds() {
   const light = useRef<ThreeSpotLight>(null);
   const stripes = useMemo(() => {
@@ -155,10 +159,10 @@ function Blinds() {
       position={[6, 4.5, 3]}
       angle={0.55}
       penumbra={0.3}
-      intensity={90}
+      intensity={80}
       distance={25}
       decay={1.6}
-      color="#7fa6ff"
+      color="#ffd29a"
       map={stripes}
       castShadow
       shadow-mapSize={[512, 512]}
@@ -250,36 +254,35 @@ function Suspect({ view, place, active, dim, calibrating }: SuspectProps) {
     g.position.x += (place.x - g.position.x) * k;
     g.position.y += (place.y - g.position.y) * k;
     size.current += (place.scale - size.current) * k;
+    // Grow in on arrival, easing out without overshoot.
     const t = Math.min(1, (performance.now() - born.current) / 450);
-    const pop = 1 + 2.2 * (t - 1) ** 3 + 1.2 * (t - 1) ** 2;
-    g.scale.setScalar(Math.max(0.001, pop * size.current));
+    const grow = 0.6 + 0.4 * (1 - (1 - t) ** 3);
+    g.scale.setScalar(Math.max(0.001, grow * size.current));
   });
   return (
     <group ref={group} position={[place.x, place.y, 0]}>
       <FaceMesh id={view.player.id} drift={view.drift} dim={dim} />
-      {calibrating && <CalibrationRing active={active} />}
+      {/* The one answering gets the gold ring on the page instead. */}
+      {calibrating && !active && <CalibrationRing />}
     </group>
   );
 }
 
-/** "Calibrating…": broken rings circling each face while baselines are recorded. */
-function CalibrationRing({ active }: { active: boolean }) {
+/** "Calibrating…": faint broken rings circling the faces waiting to set their baselines. */
+function CalibrationRing() {
   const group = useRef<Group>(null);
-  const material = useMemo(
-    () => new MeshBasicMaterial({ color: active ? new Color(2.4, 1.6, 0.4) : new Color(0.5, 1.6, 2), transparent: true, toneMapped: false }),
-    [active],
-  );
+  const material = useMemo(() => new MeshBasicMaterial({ color: new Color('#f3e6c4').multiplyScalar(0.9), transparent: true, toneMapped: false }), []);
   useEffect(() => () => material.dispose(), [material]);
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;
-    if (group.current) group.current.rotation.z = t * (active ? 1.6 : 0.6);
-    material.opacity = (active ? 0.75 : 0.25) + 0.15 * Math.sin(t * 4);
+    if (group.current) group.current.rotation.z = t * 0.5;
+    material.opacity = 0.22 + 0.08 * Math.sin(t * 2);
   });
   return (
     <group ref={group}>
       {[0, 1, 2].map((i) => (
         <mesh key={i} rotation-z={(i * Math.PI * 2) / 3} material={material}>
-          <ringGeometry args={[0.56, 0.59, 48, 1, 0, Math.PI / 2]} />
+          <ringGeometry args={[0.57, 0.585, 64, 1, 0, Math.PI / 2]} />
         </mesh>
       ))}
     </group>

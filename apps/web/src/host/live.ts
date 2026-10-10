@@ -16,6 +16,8 @@ import { useSyncExternalStore } from 'react';
 const STALE_MS = 2000;
 /** Pitch only exists in voiced 100 ms windows; hold it this long so the bar doesn't flicker. */
 const PITCH_HOLD_MS = 600;
+/** A face lost within this long ago shows as "Face lost at times" on the card. */
+const FACE_LOST_MEMORY_MS = 30_000;
 
 export interface LivePlayer {
   features: FeaturesPacket | null;
@@ -25,6 +27,8 @@ export interface LivePlayer {
   /** Latest pitch, held briefly across unvoiced windows. */
   pitchHz: number | null;
   pitchAt: number;
+  /** When the phone last reported no face in view. */
+  faceLostAt: number;
   /** Target mesh positions in three.js space (y up, z towards the viewer). */
   mesh: Float32Array;
   meshAt: number;
@@ -59,6 +63,7 @@ class LiveStore {
         speaking: false,
         pitchHz: null,
         pitchAt: -Infinity,
+        faceLostAt: -Infinity,
         mesh: new Float32Array(MESH_POINTS.length * 3),
         meshAt: -Infinity,
         version: 0,
@@ -81,6 +86,7 @@ class LiveStore {
       const p = this.get(id);
       p.features = features;
       p.featuresAt = performance.now();
+      if (!features.face.present) p.faceLostAt = p.featuresAt;
       if (features.voice.pitchHz !== null) {
         p.pitchHz = features.voice.pitchHz;
         p.pitchAt = p.featuresAt;
@@ -126,6 +132,11 @@ class LiveStore {
 }
 
 export const live = new LiveStore();
+
+/** The face is in view now but went missing within the last half minute. */
+export function faceLostRecently(p: LivePlayer): boolean {
+  return !!p.features?.face.present && performance.now() - p.faceLostAt < FACE_LOST_MEMORY_MS;
+}
 
 /** Re-renders whenever this player's live data changes (about 10 times a second). */
 export function useLivePlayer(id: string): LivePlayer {

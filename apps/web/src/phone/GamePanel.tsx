@@ -1,8 +1,11 @@
 import { ANSWER_CAP_MS, type GameState, type PlayerInfo, type TurnInfo, type Verdict } from '@deadpan/shared';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { FingerprintIcon, headline, withPeriod } from '../ui';
+import { MicBars } from './MicBars';
 
 interface Props {
-  game: GameState | null;
+  code: string;
+  game: GameState;
   playerId: string | null;
   players: PlayerInfo[];
   /** undefined until dealt; null means this player is the imposter. */
@@ -10,54 +13,103 @@ interface Props {
   verdict: Verdict | null;
   /** The face has been out of the camera's view for a moment. */
   faceLost: boolean;
+  analyser: AnalyserNode | null;
   serverNow(): number;
   onDone(turnId: string): void;
+  /** Banners about the camera, mic or connection, shown under the screen's content. */
+  children?: ReactNode;
 }
 
-/** What the phone shows during a round. */
-export function GamePanel({ game, playerId, players, secret, verdict, faceLost, serverNow, onDone }: Props) {
+/** What the phone shows during a round it's playing in. */
+export function GamePanel({ code, game, playerId, players, secret, verdict, faceLost, analyser, serverNow, onDone, children }: Props) {
   const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
+  const turn = game.turn;
+  const caseNo = `No. ${code}-${game.round}`;
 
-  if (!game || game.phase === 'lobby') {
-    return <p className="muted">Waiting for the host to start the round. Look at the big screen.</p>;
-  }
+  let screen: ReactNode;
   if (game.phase === 'verdict') {
-    if (game.verdictStage === 'revealed' && verdict) return <VerdictCard verdict={verdict} playerId={playerId} name={name} />;
-    if (game.verdictStage === 'accusing' && verdict) {
-      return (
-        <div className="verdict-card">
-          <p className="muted">The detective accuses</p>
-          <strong className="accused">{name(verdict.accusedId)}</strong>
-        </div>
+    if (game.verdictStage === 'revealed' && verdict) {
+      screen = <Result verdict={verdict} playerId={playerId} name={name} />;
+    } else if (game.verdictStage === 'accusing' && verdict) {
+      screen = (
+        <>
+          <p className="eyebrow">Verdict · Round {game.round}</p>
+          <p className="result-accused">The detective accuses</p>
+          <h1 className={`result-name ${lengthClass(name(verdict.accusedId), 5, 9)}`}>{withPeriod(name(verdict.accusedId))}</h1>
+        </>
+      );
+    } else {
+      screen = (
+        <>
+          <p className="eyebrow">Verdict · Round {game.round}</p>
+          <h1 className="phone-title waiting-title">The detective is deliberating.</h1>
+          <p className="phone-sub">Keep your eyes on the big screen.</p>
+        </>
       );
     }
-    return <p className="phase-note center">The detective is deliberating…</p>;
-  }
-  if (!playerId || !game.roundPlayers.includes(playerId)) {
-    return <p className="muted">A round is in progress. You'll play in the next one.</p>;
+  } else if (turn && turn.playerId === playerId) {
+    screen = <MyTurn turn={turn} faceLost={faceLost} analyser={analyser} serverNow={serverNow} onDone={onDone} />;
+  } else if (game.phase === 'deal') {
+    screen = (
+      <>
+        <h1 className="phone-title">Check your secret.</h1>
+        <p className="phone-sub">Don’t let anyone see it.</p>
+        {secret !== undefined && <CaseFile secret={secret} caseNo={caseNo} />}
+        {secret !== undefined && <p className="hold-note">Let go to hide it again.</p>}
+      </>
+    );
+  } else {
+    const [title, sub] = watching(game, turn, name);
+    screen = (
+      <>
+        <h1 className="phone-title">{title}</h1>
+        <p className="phone-sub">{sub}</p>
+        {secret !== undefined && <CaseFile secret={secret} caseNo={caseNo} short />}
+      </>
+    );
   }
 
-  const turn = game.turn;
-  const mine = turn?.playerId === playerId;
   return (
-    <div className="game">
-      {turn && mine && <MyTurn turn={turn} faceLost={faceLost} serverNow={serverNow} onDone={onDone} />}
-      {turn && !mine && (
-        <p className="phase-note">
-          {turn.kind === 'baseline' ? 'Calibrating ' : 'Questioning '}
-          <b>{name(turn.playerId)}</b>
-          {turn.kind === 'baseline' ? '. Stay relaxed.' : '. Watch them closely.'}
-        </p>
-      )}
-      {!turn && game.phase === 'baseline' && <p className="phase-note">The detective is setting the scene. Answer naturally when it's your turn.</p>}
-      {!turn && (game.phase === 'question' || game.phase === 'followup') && <p className="phase-note">The detective is thinking…</p>}
-      {game.phase === 'deal' && <p className="phase-note">Check your secret. Don't let anyone see it.</p>}
-      {secret !== undefined && <SecretCard secret={secret} />}
-    </div>
+    <section className="phone-main round">
+      {screen}
+      {children}
+    </section>
   );
 }
 
-function MyTurn({ turn, faceLost, serverNow, onDone }: { turn: TurnInfo; faceLost: boolean; serverNow(): number; onDone(turnId: string): void }) {
+/** Headline and line under it while someone else is on the spot, or nobody is. */
+function watching(game: GameState, turn: TurnInfo | null, name: (id: string) => string): [string, string] {
+  if (turn) {
+    const who = name(turn.playerId);
+    if (turn.kind === 'baseline') return [`${who} is calibrating.`, 'Everyone answers an easy one first.'];
+    if (turn.stage === 'asking') return [`The detective asks ${who}.`, 'Watch them closely.'];
+    return [`${who} is answering.`, 'Watch them closely.'];
+  }
+  if (game.phase === 'baseline') return ['The detective sets the scene.', 'Answer naturally when it’s your turn.'];
+  return ['The detective is thinking.', 'Keep your eyes on the big screen.'];
+}
+
+/** short, long or longer, by length, so long text gets a smaller size. */
+function lengthClass(text: string, long: number, longer: number): string {
+  return text.length > longer ? 'longer' : text.length > long ? 'long' : '';
+}
+
+const ARC_R = 108;
+const ARC = 2 * Math.PI * ARC_R;
+
+function MyTurn({
+  turn,
+  faceLost,
+  analyser,
+  serverNow,
+  onDone,
+}: {
+  turn: TurnInfo;
+  faceLost: boolean;
+  analyser: AnalyserNode | null;
+  serverNow(): number;
+  onDone(turnId: string): void;
+}) {
   const [now, setNow] = useState(serverNow);
   useEffect(() => {
     if (turn.stage !== 'answering') return;
@@ -70,93 +122,150 @@ function MyTurn({ turn, faceLost, serverNow, onDone }: { turn: TurnInfo; faceLos
     navigator.vibrate?.([70, 50, 70]);
   }, [turn.id]);
 
-  const left = turn.answerDeadline !== null ? Math.max(0, turn.answerDeadline - now) : ANSWER_CAP_MS;
-  const ring = 2 * Math.PI * 54;
+  const answering = turn.stage === 'answering';
+  const left = answering && turn.answerDeadline !== null ? Math.max(0, turn.answerDeadline - now) : ANSWER_CAP_MS;
+  const eyebrow =
+    turn.kind === 'baseline'
+      ? 'Calibration · Answer naturally'
+      : turn.kind === 'followup'
+        ? 'Follow-up · Just you'
+        : `Your turn · Question ${turn.index} of ${turn.total}`;
+
   return (
-    <div className={`my-turn ${turn.stage}`}>
-      <p className="turn-label">{turn.kind === 'baseline' ? 'Calibration · answer naturally' : 'Your turn'}</p>
-      <p className="turn-question">“{turn.text}”</p>
+    <>
+      <p className="eyebrow ask-eyebrow">{eyebrow}</p>
+      <h1 className={`ask-question ${lengthClass(turn.text, 70, 130)}`}>“{turn.text}”</h1>
+      <p className="ask-hint">{turn.stage === 'asking' ? 'Listen to the detective.' : turn.stage === 'answering' ? 'Answer out loud.' : 'Got it.'}</p>
       {faceLost && <p className="banner warn">Keep your face in the camera.</p>}
-      {turn.stage === 'asking' && <p className="muted">Listen to the detective…</p>}
-      {turn.stage === 'answering' && (
-        <>
-          <p className="answer-hint">Answer out loud</p>
-          <button className="done-button" onClick={() => onDone(turn.id)}>
-            <svg viewBox="0 0 120 120" aria-hidden>
-              <circle className="done-track" cx="60" cy="60" r="54" />
-              <circle
-                className="done-progress"
-                cx="60"
-                cy="60"
-                r="54"
-                strokeDasharray={ring}
-                strokeDashoffset={ring * (1 - left / ANSWER_CAP_MS)}
-              />
-            </svg>
-            <span className="done-label">
-              Tap when
-              <br />
-              done
-              <small>{Math.ceil(left / 1000)}s</small>
-            </span>
-          </button>
-        </>
-      )}
-      {turn.stage === 'scoring' && <p className="muted">Got it.</p>}
-    </div>
+      {/* The ring takes whatever height is left under the camera and the question. */}
+      <div className="done-wrap">
+        <button
+          className="done"
+          disabled={!answering}
+          onClick={() => onDone(turn.id)}
+          aria-label={answering ? `Done answering. ${Math.ceil(left / 1000)} seconds left.` : 'Wait for the question to finish'}
+        >
+          <svg viewBox="0 0 232 232" aria-hidden>
+            <defs>
+              <linearGradient id="dp-arc" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#f0c94f" />
+                <stop offset="1" stopColor="#b8922f" />
+              </linearGradient>
+            </defs>
+            <circle className="done-track" cx="116" cy="116" r={ARC_R} />
+            {answering && (
+              <circle className="done-arc" cx="116" cy="116" r={ARC_R} stroke="url(#dp-arc)" strokeDasharray={`${(ARC * left) / ANSWER_CAP_MS} ${ARC}`} />
+            )}
+          </svg>
+          <span className="done-face">
+            {answering ? (
+              <>
+                <span className="done-word">Done.</span>
+                <span className="done-hint">Tap when you’ve answered</span>
+                <span className="done-left">{Math.ceil(left / 1000)} s left</span>
+              </>
+            ) : turn.stage === 'asking' ? (
+              <>
+                <span className="done-word">Listen.</span>
+                <span className="done-hint">Answer when it ends</span>
+              </>
+            ) : (
+              <>
+                <span className="done-word">Got it.</span>
+                <span className="done-hint">The detective is thinking</span>
+              </>
+            )}
+          </span>
+        </button>
+      </div>
+      <p className="listening">
+        <MicBars analyser={analyser} mode="wave" />
+        <span>The detective is listening</span>
+      </p>
+    </>
   );
 }
 
-/** The secret word (or the imposter card), visible only while it's pressed and held. */
-function SecretCard({ secret }: { secret: string | null }) {
+/** The secret word (or the imposter's role), readable only while it's pressed and held. */
+function CaseFile({ secret, caseNo, short = false }: { secret: string | null; caseNo: string; short?: boolean }) {
   const [shown, setShown] = useState(false);
   const hide = () => setShown(false);
+  const onKey = (e: KeyboardEvent, down: boolean) => {
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    e.preventDefault();
+    setShown(down);
+  };
   return (
-    <button
-      className={`secret ${shown ? 'shown' : ''} ${shown && secret === null ? 'imposter' : ''}`}
-      onPointerDown={() => setShown(true)}
-      onPointerUp={hide}
-      onPointerLeave={hide}
-      onPointerCancel={hide}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      <span className="secret-tab">Case file · top secret</span>
-      {!shown && (
-        <span className="secret-hint">
-          <svg viewBox="0 0 24 24" aria-hidden>
-            <path d="M12 3a7 7 0 0 0-7 7v3M19 13v-3a7 7 0 0 0-11.2-5.6M9 21v-8a3 3 0 0 1 6 0v8M12 11v10M6 17v-2M18 18v-5" />
-          </svg>
-          Press and hold to read
+    <div className={`casefile ${short ? 'short' : ''}`}>
+      <span className="casefile-tab">Case file</span>
+      <button
+        className={`casefile-body ${shown ? 'open' : ''}`}
+        aria-label={shown ? 'Your secret is showing. Let go to hide it.' : 'Press and hold to read your secret'}
+        onPointerDown={() => setShown(true)}
+        onPointerUp={hide}
+        onPointerLeave={hide}
+        onPointerCancel={hide}
+        onKeyDown={(e) => onKey(e, true)}
+        onKeyUp={(e) => onKey(e, false)}
+        onBlur={hide}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <span className="casefile-top">
+          <span className="stamp-mini">Top secret</span>
+          <span className="casefile-no">{caseNo}</span>
         </span>
-      )}
-      {shown && secret === null && (
-        <>
-          <strong className="stamp">Imposter</strong>
-          <span className="secret-label">You don't know the word. Blend in. Don't get caught.</span>
-        </>
-      )}
-      {shown && secret !== null && (
-        <>
-          <span className="secret-label">The secret word is</span>
-          <strong className="secret-word">{secret.toUpperCase()}</strong>
-          <span className="secret-label">Describe it without saying it.</span>
-        </>
-      )}
-    </button>
+        {!shown && (
+          <span className="casefile-content">
+            <FingerprintIcon />
+            <span className="casefile-hint">Press and hold to read</span>
+          </span>
+        )}
+        {shown && secret === null && (
+          <span className="casefile-content">
+            <span className="casefile-kicker">Your role</span>
+            <span className="casefile-role">You’re the imposter.</span>
+            <span className="casefile-small">You don’t get the word. Listen to the others, then bluff.</span>
+          </span>
+        )}
+        {shown && secret !== null && (
+          <span className="casefile-content">
+            <span className="casefile-kicker">The word</span>
+            <span className={`casefile-word ${lengthClass(secret, 6, 9)}`}>{headline(secret)}</span>
+            <span className="casefile-small">Keep it to yourself.</span>
+          </span>
+        )}
+      </button>
+    </div>
   );
 }
 
-function VerdictCard({ verdict, playerId, name }: { verdict: Verdict; playerId: string | null; name(id: string): string }) {
+function Result({ verdict, playerId, name }: { verdict: Verdict; playerId: string | null; name(id: string): string }) {
+  const accused = name(verdict.accusedId);
+  const imposter = name(verdict.imposterId);
   const wasImposter = playerId === verdict.imposterId;
+  const wasAccused = playerId === verdict.accusedId;
+  const personal = wasImposter
+    ? verdict.correct
+      ? 'You got caught.'
+      : 'You fooled the detective.'
+    : wasAccused
+      ? 'You were framed.'
+      : verdict.correct
+        ? 'Case closed.'
+        : 'The imposter got away.';
   return (
-    <div className={`verdict-card ${verdict.correct ? 'caught' : 'missed'}`}>
-      <p className="muted">The detective accused</p>
-      <strong className="accused">{name(verdict.accusedId)}</strong>
-      <span className="stamp small">{verdict.correct ? 'Caught' : 'Escaped'}</span>
-      <p>
-        The imposter was <b>{name(verdict.imposterId)}</b> and the word was <b>{verdict.word}</b>.
+    <>
+      <p className="eyebrow">Verdict · Round {verdict.round}</p>
+      <p className="result-accused">The detective accused</p>
+      <h1 className={`result-name ${lengthClass(accused, 5, 9)}`}>{withPeriod(accused)}</h1>
+      <span className={`stamp ${verdict.correct ? '' : 'cleared'}`}>{verdict.correct ? 'Caught' : 'Innocent'}</span>
+      <p className="result-line">
+        The imposter was {imposter}. The word was {verdict.word}.
       </p>
-      {wasImposter && <p className="verdict-you">{verdict.correct ? 'You got caught.' : 'You fooled the detective!'}</p>}
-    </div>
+      <div className="result-card">
+        <p className="display">{personal}</p>
+        <p>The evidence is on the big screen.</p>
+      </div>
+    </>
   );
 }

@@ -1,6 +1,6 @@
 // Where each suspect's face and card go on the big screen, worked out in screen pixels from the
-// free area: right of the QR panel in the lobby, the full width between the subtitles and the
-// evidence chips during a round. The 3D faces and the DOM cards both read the same slots.
+// free area: right of the join panel and under "The lineup." in the lobby; below the detective's
+// line (measured from the page) during a round. The 3D faces and the DOM cards read the same slots.
 
 export type CardVariant = 'lobby' | 'full' | 'compact';
 
@@ -28,22 +28,24 @@ export interface Slot {
  * allows (about 0.85) the text is still readable from about 2 m away.
  */
 export const CARD_SIZE: Record<CardVariant, { w: number; h: number }> = {
-  lobby: { w: 270, h: 104 },
-  full: { w: 330, h: 316 },
-  compact: { w: 300, h: 206 },
+  lobby: { w: 270, h: 112 },
+  full: { w: 320, h: 340 },
+  compact: { w: 300, h: 232 },
 };
 
-/** Face width over height, for the neon meshes. */
+/** Face width over height, for the meshes. */
 const FACE_ASPECT = 0.8;
-/** Width a face takes beside its card, leaving room for the calibration ring. */
-const FACE_BOX = 0.9;
-const GAP = 14;
-const BESIDE_GAP = 18;
+/** Width a face takes beside its card, leaving room for the gold ring. */
+const FACE_BOX = 0.95;
+const GAP = 16;
+const BESIDE_GAP = 22;
 const MAX_SCALE = 1.15;
+/** The most of a row's height a card under its face may take: readable text comes first. */
+const CARD_SHARE = 0.68;
 
 /**
  * Up to 4 suspects share one row with cards under their faces. 5–6 go in two rows (3 + 3 or
- * 3 + 2) with compact cards beside their faces, so both rows fit the screen's height.
+ * 3 + 2); during a round their cards are compact and sit beside the faces, so both rows fit.
  */
 export function layoutSuspects(n: number, area: Area, inRound: boolean, viewportH: number): Slot[] {
   if (n <= 0 || area.w <= 0 || area.h <= 0) return [];
@@ -60,10 +62,10 @@ export function layoutSuspects(n: number, area: Area, inRound: boolean, viewport
   let faceH: number;
   if (beside) {
     scale = Math.min(MAX_SCALE, (slotW * 0.62) / card.w, (rowH * 0.9) / card.h);
-    faceH = Math.min(rowH * 0.92, (slotW * 0.96 - card.w * scale - BESIDE_GAP) / FACE_BOX, viewportH * 0.34);
+    faceH = Math.min(rowH * 0.86, (slotW * 0.96 - card.w * scale - BESIDE_GAP) / FACE_BOX, viewportH * 0.3);
   } else {
-    scale = Math.min(MAX_SCALE, (slotW * 0.92) / card.w, (rowH * 0.55) / card.h);
-    faceH = Math.min(rowH - card.h * scale - GAP, (slotW * 0.85) / FACE_ASPECT, viewportH * 0.36);
+    scale = Math.min(MAX_SCALE, (slotW * 0.9) / card.w, (rowH * CARD_SHARE) / card.h);
+    faceH = Math.min(rowH - card.h * scale - GAP, (slotW * 0.8) / FACE_ASPECT, viewportH * (inRound ? 0.28 : 0.3));
   }
   faceH = Math.max(48, faceH);
   const blockH = beside ? Math.max(faceH, card.h * scale) : faceH + GAP + card.h * scale;
@@ -105,16 +107,25 @@ export function layoutSuspects(n: number, area: Area, inRound: boolean, viewport
   return slots;
 }
 
+export interface Reserved {
+  /** Left edge of the free area: right of the lobby's join panel, or the screen margin. */
+  left: number;
+  /** Top edge: below "The lineup." or the detective's line. */
+  top: number;
+  /** Space kept clear along the bottom, for the evidence chips. */
+  bottom: number;
+}
+
 /** The free area for suspects, given the window and what the overlay covers. */
-export function stageArea(viewport: { w: number; h: number }, inRound: boolean, lobbyPanelRight: number): Area {
+export function stageArea(viewport: { w: number; h: number }, reserved: Reserved): Area {
   const margin = 24;
-  if (!inRound) {
-    const x = lobbyPanelRight + margin;
-    const y = 64;
-    return { x, y, w: viewport.w - x - margin, h: viewport.h - y - margin };
-  }
-  // Subtitles and the verdict above, evidence chips below.
-  const top = Math.max(200, viewport.h * 0.25);
-  const bottom = Math.max(72, viewport.h * 0.09);
-  return { x: margin, y: top, w: viewport.w - margin * 2, h: viewport.h - top - bottom };
+  const x = Math.max(margin, reserved.left);
+  const y = Math.max(margin, reserved.top);
+  return { x, y, w: viewport.w - x - margin, h: viewport.h - y - Math.max(margin, reserved.bottom) };
+}
+
+/** The square box, in CSS pixels, of a circle drawn around a slot's face. */
+export function ringBox(slot: Slot, k = 1.18) {
+  const d = slot.faceH * k;
+  return { x: slot.faceX - d / 2, y: slot.faceY - d / 2, d };
 }

@@ -5,14 +5,18 @@ import { RoomSocket } from '../lib/socket';
 import { DebugOverlay } from '../phone/DebugOverlay';
 import { loadFaceLandmarker } from '../phone/face';
 import { GamePanel } from '../phone/GamePanel';
+import { MicBars } from '../phone/MicBars';
 import { PhoneSignals } from '../phone/signals';
 import { TurnController } from '../phone/turns';
+import { CheckIcon, Emblems, LockIcon, MicIcon } from '../ui';
 
 type Stage = 'setup' | 'starting' | 'live' | 'error';
 interface Health {
   cam: boolean;
   mic: boolean;
 }
+/** loading: the face tracker is still downloading. lost: no face for a moment. */
+type FaceState = 'loading' | 'found' | 'lost' | 'failed';
 
 const NAME_KEY = 'deadpan:name';
 
@@ -34,7 +38,6 @@ function saveName(name: string) {
 
 export function Play({ code }: { code: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const meterRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<RoomSocket | null>(null);
   const mediaRef = useRef<PhoneMedia | null>(null);
   // Set when the player first taps start; from then on every (re)connect sends a join.
@@ -58,7 +61,8 @@ export function Play({ code }: { code: string }) {
   const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') === '1');
   /** During a round only the health dot shows; tapping it shows the details. */
   const [showHealth, setShowHealth] = useState(false);
-  const [faceLost, setFaceLost] = useState(false);
+  const [faceState, setFaceState] = useState<FaceState>('loading');
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   /** Width over height of the camera image: portrait on phones, landscape on most laptops. */
   const [videoAspect, setVideoAspect] = useState(3 / 4);
   const [game, setGame] = useState<GameState | null>(null);
@@ -138,8 +142,14 @@ export function Play({ code }: { code: string }) {
     if (!signals) return;
     let lastSeen = Date.now();
     const id = setInterval(() => {
-      if (signals.face?.face.present ?? true) lastSeen = Date.now();
-      setFaceLost(Date.now() - lastSeen > 1500);
+      const tracker = signals.face;
+      if (!tracker) {
+        lastSeen = Date.now();
+        setFaceState(signals.faceError ? 'failed' : 'loading');
+        return;
+      }
+      if (tracker.face.present) lastSeen = Date.now();
+      setFaceState(Date.now() - lastSeen > 1500 ? 'lost' : tracker.face.present ? 'found' : 'loading');
     }, 300);
     return () => clearInterval(id);
   }, [signals]);
@@ -183,7 +193,7 @@ export function Play({ code }: { code: string }) {
     };
   }, [stage]);
 
-  // While live: watch the camera, mic and audio context, report changes, and draw the mic meter.
+  // While live: watch the camera, mic and audio context, report changes, and note the mic's peak.
   useEffect(() => {
     const media = mediaRef.current;
     if (stage !== 'live' || !media) return;
@@ -208,14 +218,12 @@ export function Play({ code }: { code: string }) {
     audioCtx.addEventListener('statechange', update);
     const poll = setInterval(update, 1000);
 
+    setAnalyser(analyser);
     const buffer = new Float32Array(analyser.fftSize);
     let peakDb = -Infinity;
-    let frame = requestAnimationFrame(function draw() {
-      const db = 20 * Math.log10(micLevel(analyser, buffer) + 1e-8);
-      peakDb = Math.max(peakDb, db);
-      const fill = Math.min(1, Math.max(0, (db + 60) / 50)); // -60 dB empty, -10 dB full
-      if (meterRef.current) meterRef.current.style.transform = `scaleX(${fill})`;
-      frame = requestAnimationFrame(draw);
+    let frame = requestAnimationFrame(function measure() {
+      peakDb = Math.max(peakDb, 20 * Math.log10(micLevel(analyser, buffer) + 1e-8));
+      frame = requestAnimationFrame(measure);
     });
 
     // One line in the server log so mic problems can be read from the laptop.
@@ -286,67 +294,148 @@ export function Play({ code }: { code: string }) {
   const me = players.find((p) => p.id === playerId);
   const allOk = connected && health.cam && health.mic;
   const inRound = !!game && game.phase !== 'lobby' && !!playerId && game.roundPlayers.includes(playerId);
+  const live = stage === 'live';
+  const faceLost = faceState === 'lost';
+  const faceText = { loading: 'Finding your face…', found: 'Face found', lost: 'Face not in view', failed: 'Face tracking failed' }[faceState];
+  // The camera stays big through the round; at the verdict it steps aside for the result.
+  const camMode = !live ? 'hidden' : !inRound ? 'big' : game.phase === 'verdict' ? 'strip' : 'round';
+
+  // While waiting the checks sit over the bottom of the video; in a round, a row under the strip.
+  const checks = (where: 'over-video' | 'row') => (
+    <ul className={where === 'over-video' ? 'cam-checks' : 'checks round-checks'} aria-label="Device checks">
+      <li>
+        <span className="check-label">
+          <CheckIcon ok={health.cam} />
+          Camera
+        </span>
+        <span className={`check-value ${health.cam ? '' : 'bad'}`}>{health.cam ? 'Ready' : 'Off'}</span>
+      </li>
+      <li>
+        <span className="check-label">
+          <CheckIcon ok={health.mic} />
+          Mic
+        </span>
+        <span className="check-value">{health.mic ? <MicBars analyser={analyser} /> : <span className="bad">Off</span>}</span>
+      </li>
+      <li>
+        <span className="check-label">
+          <CheckIcon ok={connected} />
+          Server
+        </span>
+        <span className={`check-value ${connected ? '' : 'bad'}`}>{connected ? (rtt !== null ? `${rtt} ms` : 'Connected') : 'Offline'}</span>
+      </li>
+    </ul>
+  );
+
+  const problems = (
+    <>
+      {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
+      {(!health.cam || (!health.mic && !audioAsleep)) && (
+        <button className="btn black stuck" onClick={() => location.reload()}>
+          Camera or mic stopped. Reload
+        </button>
+      )}
+    </>
+  );
 
   return (
     <main className="phone">
       <header className="phone-bar">
-        <span className="wordmark small">DEADPAN</span>
-        <span className="room-tag">Room {code}</span>
-        {stage === 'live' && (
-          <button className="health-dot" onClick={() => setShowHealth((v) => !v)} aria-label={allOk ? 'Camera, mic and connection OK' : 'Something needs attention'}>
-            <span className={`dot ${allOk ? 'ok' : 'bad'}`} />
-          </button>
-        )}
+        <span className="wordmark">DEADPAN</span>
+        <span className="phone-bar-right">
+          {/* Everything the phone measures, live: face, heart, voice and connection. */}
+          {live && (
+            <button className={`signals-btn ${showDebug ? 'on' : ''}`} onClick={() => setShowDebug((v) => !v)} aria-pressed={showDebug}>
+              Signals
+            </button>
+          )}
+          {live ? (
+            <button
+              className="room-tag"
+              onClick={() => setShowHealth((v) => !v)}
+              aria-label={`Room ${code}. ${allOk ? 'Camera, mic and connection OK' : 'Something needs attention'}`}
+            >
+              <span className={`dot ${allOk ? '' : 'bad'}`} />
+              Room {code}
+            </button>
+          ) : (
+            <span className="room-tag">Room {code}</span>
+          )}
+        </span>
       </header>
 
-      {serverError && <p className="banner bad">{serverError}</p>}
-
-      <div
-        className={`preview ${stage === 'live' ? '' : 'hidden'} ${inRound ? 'compact' : ''}`}
-        style={{ '--video-aspect': String(videoAspect) } as CSSProperties}
-      >
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          autoPlay
-          onLoadedMetadata={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
-          onResize={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
-        />
-        {signals && showDebug && <DebugOverlay signals={signals} scribe={scribeStatus} />}
-        {stage === 'live' && (
-          <button className="debug-toggle" onClick={() => setShowDebug((v) => !v)}>
-            {showDebug ? 'hide debug' : 'debug'}
-          </button>
-        )}
+      {/* One video element for the whole session, so face tracking never restarts: a large preview
+          while waiting, a big card during the round, and a strip at the verdict. */}
+      <div className={`cam ${camMode}`}>
+        <div className="cam-view" style={{ '--video-aspect': String(videoAspect) } as CSSProperties}>
+          <video
+            ref={videoRef}
+            playsInline
+            muted
+            autoPlay
+            onLoadedMetadata={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+            onResize={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+          />
+          <span className="cam-chip">
+            <span className={`dot ${faceState === 'found' ? '' : 'warn'}`} />
+            {faceText}
+          </span>
+          <span className={`cam-mic-chip ${health.mic ? '' : 'bad'}`} aria-label={health.mic ? 'Mic on' : 'Mic off'}>
+            <MicIcon />
+          </span>
+          {live && checks('over-video')}
+        </div>
+        <span className="cam-text">
+          <span className="cam-text-main">On camera</span>
+          <span className={`cam-text-sub ${faceState === 'found' ? '' : 'warn'}`}>
+            <span className={`dot ${faceState === 'found' ? '' : 'warn'}`} />
+            {faceText}
+          </span>
+        </span>
+        <span className={`cam-mic ${health.mic ? '' : 'bad'}`}>
+          <MicIcon />
+          {health.mic ? 'Mic on' : 'Mic off'}
+        </span>
       </div>
 
       {(stage === 'setup' || stage === 'starting') && (
-        <section className="setup">
-          <label htmlFor="name">Your name</label>
-          <input
-            id="name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={MAX_NAME_LENGTH}
-            autoComplete="nickname"
-            enterKeyHint="done"
-            placeholder="e.g. Sam"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur();
-            }}
-          />
-          <button className="button primary huge" onClick={start} disabled={!name.trim() || stage === 'starting'}>
-            {stage === 'starting' ? 'Starting…' : 'Tap to start'}
-          </button>
-          <p className="muted small">
-            Uses your front camera and mic. Video never leaves your phone, only numbers do.
+        <section className="phone-main join-main">
+          <Emblems small />
+          <p className="eyebrow join-eyebrow">You’re joining</p>
+          <h1 className="join-title">Room {code}.</h1>
+          <p className="join-tagline">One of you is lying. The detective is listening.</p>
+          {serverError && <p className="banner bad">{serverError}</p>}
+          <div className="join-form">
+            <div className="field">
+              <label htmlFor="name">Your name</label>
+              <input
+                id="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={MAX_NAME_LENGTH}
+                autoComplete="nickname"
+                enterKeyHint="done"
+                placeholder="Ash"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur();
+                }}
+              />
+            </div>
+            {/* Must stay a direct tap: iOS only grants the camera, mic and audio from a user gesture. */}
+            <button className="btn black" onClick={start} disabled={!name.trim() || stage === 'starting'}>
+              {stage === 'starting' ? 'Starting…' : 'Start camera and join'}
+            </button>
+          </div>
+          <p className="note">
+            <LockIcon size={18} />
+            <span>Uses your front camera and mic. Video never leaves your phone, only numbers do.</span>
           </p>
         </section>
       )}
 
       {stage === 'error' && (
-        <section className="setup">
+        <section className="phone-main">
+          <h1 className="phone-title">Camera trouble.</h1>
           {mediaError && (
             <div className="banner bad">
               <p className="error-title">{mediaError.message}</p>
@@ -359,45 +448,41 @@ export function Play({ code }: { code: string }) {
               )}
             </div>
           )}
-          <button className="button primary" onClick={start}>
+          <button className="btn black stuck" onClick={start}>
             Try again
           </button>
-          <button className="button" onClick={() => location.reload()}>
+          <button className="btn outline stuck" onClick={() => location.reload()}>
             Reload page
           </button>
-          {mediaError && <p className="muted small details">{mediaError.details}</p>}
+          {mediaError && <p className="muted details stuck">{mediaError.details}</p>}
         </section>
       )}
 
-      {stage === 'live' && (
-        <section className="live">
-          {(!inRound || showHealth || !allOk) && (
+      {live && !inRound && (
+        <section className="phone-main waiting">
+          {serverError && <p className="banner bad">{serverError}</p>}
+          {problems}
+          {me ? (
             <>
-              <ul className="checks">
-                <li className={health.cam ? 'ok' : 'bad'}>Camera</li>
-                <li className={health.mic ? 'ok' : 'bad'}>Mic</li>
-                <li className={connected ? 'ok' : 'bad'}>
-                  Server{rtt !== null && <span className="muted"> {rtt} ms</span>}
-                </li>
-              </ul>
-              <div className="meter" aria-label="Mic level">
-                <div ref={meterRef} className="meter-fill" />
-              </div>
+              <h1 className="phone-title waiting-title">You’re in, {me.name}.</h1>
+              <p className="waiting-count">
+                {players.length} {players.length === 1 ? 'suspect' : 'suspects'} in the room.
+              </p>
+              <p className="waiting-lead">
+                {game && game.phase !== 'lobby' ? 'A round is in progress. You’ll play in the next one.' : 'Keep your eyes on the big screen.'}
+              </p>
             </>
+          ) : (
+            <h1 className="phone-title waiting-title">Joining…</h1>
           )}
-          {!inRound && (
-            <p>
-              {me ? (
-                <>
-                  You're in as <b>{me.name}</b>. {players.length} {players.length === 1 ? 'player' : 'players'} in the room.
-                </>
-              ) : (
-                'Joining…'
-              )}
-            </p>
-          )}
-          {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
+        </section>
+      )}
+
+      {live && inRound && game && (
+        <>
+          {(showHealth || !allOk) && checks('row')}
           <GamePanel
+            code={code}
             game={game}
             playerId={playerId}
             players={players}
@@ -405,15 +490,16 @@ export function Play({ code }: { code: string }) {
             verdict={verdict}
             serverNow={serverNow}
             faceLost={faceLost}
+            analyser={analyser}
             onDone={(turnId) => turnsRef.current?.done(turnId)}
-          />
-          {(!health.cam || (!health.mic && !audioAsleep)) && (
-            <button className="button" onClick={() => location.reload()}>
-              Camera or mic stopped. Reload
-            </button>
-          )}
-        </section>
+          >
+            {serverError && <p className="banner bad">{serverError}</p>}
+            {problems}
+          </GamePanel>
+        </>
       )}
+
+      {signals && showDebug && <DebugOverlay signals={signals} scribe={scribeStatus} />}
     </main>
   );
 }

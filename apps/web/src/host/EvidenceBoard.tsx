@@ -1,23 +1,31 @@
-// The evidence board: one lane per suspect along the round's timeline, with the questions, every
-// word they said where they said it, their signal traces, and the spikes the detective noticed.
+// The evidence board: one track per suspect along the round's timeline, with each question and
+// answer window, what they said, their signal traces, and the spikes against their own baseline.
 // It reads the round recording (rounds/<room>-<round>.json) from the server.
 import type { AnswerResult, RoundFile, RoundSample } from '@deadpan/shared';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState, type ReactElement } from 'react';
+import { SPIKE } from '../ui';
 
-const W = 1200;
-const LEFT = 120;
-const RIGHT = 20;
-const LANE = 178;
-const TOP = 34;
-const FILLER = /^(um+|uh+|uhm|erm|er|hmm+|mm)[,.!?]?$/i;
+/** The traces are drawn in a 1000 × 130 box, stretched to the track's width. */
+const TRACE_W = 1000;
+const TRACE_H = 130;
+/** On the timeline each quote is cut off at this width, and before the next one starts; the full
+    answers are listed under the timeline. */
+const SAID_MAX_PX = 160;
+/**
+ * The filler words the server counts (server/src/scoring.ts): um, uh and friends, "you know", and
+ * "like" only when it's set off with commas ("it's, like, a bird").
+ */
+const FILLER_RE = /\b(?:umm?|uhh?|uhm|erm|er|hmm|mm)\b|(?<=(?:^|[,.!?])\s*)like(?=\s*,)|\byou know\b/gi;
+const KIND_LABEL = { baseline: 'Warm-up', question: 'Question', followup: 'Follow-up' } as const;
 
 interface Props {
   room: string;
   round: number;
   onClose?: () => void;
+  closeLabel?: string;
 }
 
-export function EvidenceBoard({ room, round, onClose }: Props) {
+export function EvidenceBoard({ room, round, onClose, closeLabel = 'Close' }: Props) {
   const [data, setData] = useState<RoundFile | null>(null);
   const [error, setError] = useState('');
 
@@ -35,102 +43,141 @@ export function EvidenceBoard({ room, round, onClose }: Props) {
     };
   }, [room, round]);
 
+  const name = (id: string) => data?.players.find((p) => p.id === id)?.name ?? '?';
+  const v = data?.verdict;
+
   return (
-    <section className="evidence-board">
+    <section className="board" role="dialog" aria-label="Evidence board">
       <header className="board-head">
         <div>
-          <p className="phase-banner">Evidence board</p>
-          <h2>
-            Room {room} · Round {round}
-            {data?.word && (
-              <>
-                {' '}
-                · the word was <span className="word">{data.word}</span>
-              </>
-            )}
-          </h2>
-          {data?.verdict && <VerdictLine data={data} />}
+          <p className="eyebrow board-eyebrow">Evidence board</p>
+          <h1 className="board-title">
+            Round {round}.{data?.word && ` The word was ${data.word}.`}
+          </h1>
+          <ul className="board-chips">
+            <li>Room {room}</li>
+            {v && <li>Accused: {name(v.accusedId)}</li>}
+            {v && <li>Imposter: {name(v.imposterId)}</li>}
+            {v && <li className={v.correct ? 'caught' : 'escaped'}>{v.correct ? 'Caught' : 'Escaped'}</li>}
+          </ul>
         </div>
         {onClose && (
-          <button className="button" onClick={onClose}>
-            Close
+          <button className="btn outline" onClick={onClose}>
+            {closeLabel}
           </button>
         )}
       </header>
-      {error && <p className="banner bad">{error}</p>}
-      {!data && !error && <p className="muted">Loading the round…</p>}
-      {data && <Timeline data={data} />}
-      {data && (
-        <p className="legend">
-          <span className="key pitch">pitch</span>
-          <span className="key voice">voice level</span>
-          <span className="key lip">lip press</span>
-          <span className="key blink">blink</span>
-          <span className="key speech">speaking</span>
-          <span className="key spike">spike vs. their own baseline</span>
-        </p>
-      )}
-    </section>
-  );
-}
 
-function VerdictLine({ data }: { data: RoundFile }) {
-  const name = (id: string) => data.players.find((p) => p.id === id)?.name ?? '?';
-  const v = data.verdict!;
-  return (
-    <p className="muted">
-      Accused <b>{name(v.accusedId)}</b> · imposter <b>{name(v.imposterId)}</b> ·{' '}
-      <span className={v.correct ? 'hot' : 'ok-text'}>{v.correct ? 'caught' : 'escaped'}</span>
-    </p>
+      <ul className="legend" aria-label="Legend">
+        <li>
+          <span className="key voice" />
+          Voice level
+        </li>
+        <li>
+          <span className="key lip" />
+          Lip press
+        </li>
+        <li>
+          <span className="key pitch" />
+          Pitch
+        </li>
+        <li>
+          <span className="key blink" />
+          Blink
+        </li>
+        <li>
+          <span className="key talk" />
+          Speaking
+        </li>
+        <li>
+          <span className="key window" />
+          Question, then answer
+        </li>
+        <li>
+          <span className="key spike">+2σ</span>
+          Spike against their own baseline
+        </li>
+      </ul>
+
+      {error && <p className="board-status bad">{error}</p>}
+      {!data && !error && <p className="board-status">Loading the round…</p>}
+      {data && <Timeline data={data} />}
+    </section>
   );
 }
 
 function Timeline({ data }: { data: RoundFile }) {
   const t0 = data.turns[0]?.askedAt ?? data.startedAt;
-  const t1 = data.endedAt || data.turns.at(-1)?.answerEnd || t0 + 60_000;
-  const x = (t: number) => LEFT + ((t - t0) / Math.max(1, t1 - t0)) * (W - LEFT - RIGHT);
-  const height = TOP + data.players.length * LANE + 10;
+  const t1 = Math.max(t0 + 1000, data.endedAt || data.turns.at(-1)?.answerEnd || t0 + 60_000);
+  const pct = (t: number) => Math.min(100, Math.max(0, ((t - t0) / (t1 - t0)) * 100));
 
-  // Seconds along the top.
+  // Seconds along the top, every 10 s (20 s for long rounds).
+  const span = (t1 - t0) / 1000;
+  const step = span > 150 ? 20 : 10;
   const ticks: number[] = [];
-  for (let s = 0; s <= (t1 - t0) / 1000; s += 10) ticks.push(s);
+  for (let s = 0; s <= span; s += step) ticks.push(s);
 
   return (
-    <svg className="timeline" viewBox={`0 0 ${W} ${height}`} role="img" aria-label="Round timeline">
-      {ticks.map((s) => (
-        <g key={s}>
-          <line x1={x(t0 + s * 1000)} x2={x(t0 + s * 1000)} y1={TOP - 8} y2={height} className="grid" />
-          <text x={x(t0 + s * 1000)} y={TOP - 14} className="tick">
-            {s}s
-          </text>
-        </g>
-      ))}
-      {data.players.map((p, i) => (
-        <Lane key={p.id} data={data} playerId={p.id} name={p.name} y={TOP + i * LANE} x={x} t0={t0} t1={t1} />
-      ))}
-    </svg>
+    <div className="board-scroll">
+      <div className="board-chart">
+        <div className="board-axis" aria-hidden>
+          <span />
+          <div className="axis">
+            {ticks.map((s) => (
+              <span key={s} style={{ left: `${pct(t0 + s * 1000)}%` }}>
+                {s}s
+              </span>
+            ))}
+          </div>
+        </div>
+        {data.players.map((p) => (
+          <Track key={p.id} data={data} playerId={p.id} name={p.name} pct={pct} ticks={ticks.map((s) => t0 + s * 1000)} t0={t0} t1={t1} />
+        ))}
+      </div>
+    </div>
   );
 }
 
-interface LaneProps {
+interface TrackProps {
   data: RoundFile;
   playerId: string;
   name: string;
-  y: number;
-  x: (t: number) => number;
+  /** Time to percent of the track's width. */
+  pct: (t: number) => number;
+  ticks: number[];
   t0: number;
   t1: number;
 }
 
-function Lane({ data, playerId, name, y, x, t0, t1 }: LaneProps) {
+const SPIKE_LABELS: [keyof NonNullable<AnswerResult['z']>, string][] = [
+  ['rt', 'Response'],
+  ['pitch', 'Pitch'],
+  ['fillers', 'Fillers'],
+  ['pauses', 'Pauses'],
+  ['blink', 'Blinks'],
+  ['lip', 'Lips'],
+];
+
+/** "Response +3.0σ · Lips +2.8σ": the biggest spikes against this player's baseline. */
+function spikeText(answer: AnswerResult | undefined): string {
+  if (!answer?.z) return '';
+  const z = answer.z;
+  return SPIKE_LABELS.map(([key, label]) => [label, z[key]] as const)
+    .filter((entry): entry is readonly [string, number] => entry[1] !== null && entry[1] > SPIKE)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([label, value]) => `${label} +${value.toFixed(1)}σ`)
+    .join(' · ');
+}
+
+function Track({ data, playerId, name, pct, ticks, t0, t1 }: TrackProps) {
   const samples = (data.samples[playerId] ?? []).filter((s) => s[0] >= t0 && s[0] <= t1);
   const turns = data.turns.filter((t) => t.playerId === playerId);
-  const answers = data.answers.filter((a) => a.playerId === playerId);
   const isImposter = data.imposterId === playerId;
-  const traceTop = y + 34;
-  const traceH = 74;
+  const isAccused = data.verdict?.accusedId === playerId;
+  const x = (t: number) => (pct(t) / 100) * TRACE_W;
 
-  const path = (value: (s: RoundSample) => number | null, min: number, max: number) => {
+  const path = (value: (s: RoundSample) => number | null, min: number, max: number, top: number, height: number) => {
     let d = '';
     let pen = false;
     for (const s of samples) {
@@ -140,7 +187,7 @@ function Lane({ data, playerId, name, y, x, t0, t1 }: LaneProps) {
         continue;
       }
       const k = Math.min(1, Math.max(0, (v - min) / (max - min)));
-      d += `${pen ? 'L' : 'M'}${x(s[0]).toFixed(1)},${(traceTop + traceH * (1 - k)).toFixed(1)}`;
+      d += `${pen ? 'L' : 'M'}${x(s[0]).toFixed(1)} ${(top + height * (1 - k)).toFixed(1)}`;
       pen = true;
     }
     return d;
@@ -155,104 +202,124 @@ function Lane({ data, playerId, name, y, x, t0, t1 }: LaneProps) {
     return spans;
   }, []);
 
+  // Each answer's window, what was said in it, and how far its label may run before the next one.
+  const windows = turns.map((turn) => {
+    const start = turn.questionEnd ?? turn.askedAt;
+    const end = turn.answerEnd ?? start;
+    const answer = data.answers.find((a) => a.turnId === turn.id);
+    const said = data.transcripts.find((tr) => tr.turnId === turn.id)?.text.trim() ?? answer?.metrics.transcript.trim() ?? '';
+    return { turn, start, end, said, answer, spike: spikeText(answer) };
+  });
+  const room = (i: number) => (i + 1 < windows.length ? pct(windows[i + 1]!.start) : 100) - pct(windows[i]!.start);
+
   return (
-    <g className="lane">
-      <rect x={0} y={y} width={W} height={LANE - 8} className={`lane-bg ${isImposter ? 'imposter' : ''}`} rx={8} />
-      <text x={14} y={y + 26} className="lane-name">
-        {name}
-      </text>
-      {isImposter && (
-        <text x={14} y={y + 44} className="lane-tag">
-          IMPOSTER
-        </text>
-      )}
-      {data.verdict?.accusedId === playerId && (
-        <text x={14} y={y + 60} className="lane-tag accused">
-          ACCUSED
-        </text>
-      )}
+    <div className={`track ${isImposter ? 'imposter' : ''}`}>
+      <div className="track-who">
+        <span className="track-name">{name}</span>
+        <div className="track-tags">
+          {isImposter && <span className="tag imposter">Imposter</span>}
+          {isAccused && <span className="tag accused">Accused</span>}
+          {!isImposter && <span className="tag">Innocent</span>}
+        </div>
+      </div>
 
-      {turns.map((turn) => {
-        const answer = answers.find((a) => a.turnId === turn.id);
-        const start = turn.questionEnd ?? turn.askedAt;
-        const end = turn.answerEnd ?? start;
-        return (
-          <g key={turn.id}>
-            <rect x={x(turn.askedAt)} y={y + 8} width={Math.max(1, x(start) - x(turn.askedAt))} height={LANE - 24} className="asked" />
-            <rect x={x(start)} y={y + 8} width={Math.max(2, x(end) - x(start))} height={LANE - 24} className={`answer ${turn.kind}`} />
-            <text x={x(turn.askedAt) + 4} y={y + 22} className="question-label">
-              {clip(turn.question, Math.max(8, Math.floor((x(end) - x(turn.askedAt)) / 6.2)))}
-            </text>
-            {answer && <Spikes answer={answer} x={x(start) + 4} y={y + 36} />}
-          </g>
-        );
-      })}
+      <div className="track-chart">
+        {ticks.map((t) => (
+          <span key={t} className="grid-line" style={{ left: `${pct(t)}%` }} />
+        ))}
 
-      <path d={path((s) => (s[2] > 0 ? 20 * Math.log10(s[2]) : null), -60, -10)} className="trace voice" />
-      <path d={path((s) => s[4], 0, 0.5)} className="trace lip" />
-      <path d={path((s) => (s[1] > 0 ? s[1] : null), 70, 320)} className="trace pitch" />
-      {blinks.map((t) => (
-        <line key={t} x1={x(t)} x2={x(t)} y1={traceTop + traceH + 4} y2={traceTop + traceH + 12} className="blink" />
-      ))}
-      {speaking.map((s) => (
-        <rect key={s.from} x={x(s.from)} y={traceTop + traceH + 16} width={Math.max(1, x(s.to) - x(s.from))} height={4} className="speech" rx={2} />
-      ))}
-      <Words data={data} playerId={playerId} x={x} y={y + LANE - 30} />
-    </g>
+        {windows.map(({ turn, start, end, said, spike }, i) => {
+          const qLeft = pct(turn.askedAt);
+          const qWidth = Math.max(0.2, pct(end) - qLeft);
+          const aLeft = pct(start);
+          const aWidth = Math.max(0.2, pct(end) - aLeft);
+          const roomPct = room(i);
+          return (
+            <Fragment key={turn.id}>
+              <span className="band-q" style={{ left: `${qLeft}%`, width: `${qWidth}%` }} />
+              <span className={`band-a ${spike ? 'spike' : ''}`} style={{ left: `${aLeft}%`, width: `${aWidth}%` }} />
+              <span className="band-label" title={turn.question} style={{ left: `${qLeft}%`, width: `${qWidth}%` }}>
+                <b>{i + 1}</b> {turn.question}
+              </span>
+              {spike && (
+                <span className="spike-pill" title={spike} style={{ left: `${aLeft}%`, maxWidth: `calc(${roomPct}% - 6px)` }}>
+                  {spike}
+                </span>
+              )}
+              {said && (
+                <span className="said" title={said} style={{ left: `${aLeft}%`, maxWidth: `min(${SAID_MAX_PX}px, calc(${roomPct}% - 6px))` }}>
+                  “{said}”
+                </span>
+              )}
+            </Fragment>
+          );
+        })}
+
+        <svg className="traces" viewBox={`0 0 ${TRACE_W} ${TRACE_H}`} preserveAspectRatio="none" aria-hidden>
+          <path d={path((s) => (s[2] > 0 ? 20 * Math.log10(s[2]) : null), -60, -10, 6, 118)} className="trace voice" />
+          <path d={path((s) => s[4], 0, 0.5, 20, 104)} className="trace lip" />
+          <path d={path((s) => (s[1] > 0 ? s[1] : null), 70, 320, 10, 100)} className="trace pitch" />
+        </svg>
+
+        {blinks.map((t) => (
+          <span key={t} className="blink-tick" style={{ left: `${pct(t)}%` }} />
+        ))}
+        {speaking.map((s) => (
+          <span key={s.from} className="talk-bar" style={{ left: `${pct(s.from)}%`, width: `${Math.max(0, pct(s.to) - pct(s.from))}%` }} />
+        ))}
+      </div>
+
+      {/* Everything they said, in full, numbered to match the timeline. */}
+      {windows.length > 0 && (
+        <ol className="said-list">
+          {windows.map(({ turn, said, answer, spike }, i) => (
+            <li key={turn.id} className={`said-card ${spike ? 'spike' : ''}`}>
+              <p className="said-q">
+                <b>{i + 1}</b>
+                <span>
+                  {KIND_LABEL[turn.kind]} · {turn.question}
+                </span>
+              </p>
+              <p className={`said-a ${said ? '' : 'none'}`}>{said ? <>“{withFillers(said)}”</> : 'No answer heard.'}</p>
+              <p className="said-meta">
+                {answerFacts(answer).map((fact) => (
+                  <span key={fact}>{fact}</span>
+                ))}
+                {spike && <span className="spike-pill">{spike}</span>}
+              </p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   );
 }
 
-/** Signals more than one standard deviation from this player's calm baseline. */
-function Spikes({ answer, x, y }: { answer: AnswerResult; x: number; y: number }) {
-  if (!answer.z) return null;
-  const labels: [string, number | null][] = [
-    ['RT', answer.z.rt],
-    ['pitch', answer.z.pitch],
-    ['fillers', answer.z.fillers],
-    ['pauses', answer.z.pauses],
-    ['blinks', answer.z.blink],
-    ['lips', answer.z.lip],
-  ];
-  const spikes = labels.filter(([, z]) => z !== null && z > 1);
-  return (
-    <>
-      {spikes.slice(0, 3).map(([label, z], i) => (
-        <text key={label} x={x} y={y + i * 13} className="spike">
-          {label} +{z!.toFixed(1)}σ
-        </text>
-      ))}
-    </>
-  );
-}
-
-/** Each transcribed word at the moment it was said, alternating rows so neighbours don't collide. */
-function Words({ data, playerId, x, y }: { data: RoundFile; playerId: string; x: (t: number) => number; y: number }) {
-  const items: { t: number; w: string }[] = [];
-  for (const tr of data.transcripts.filter((t) => t.playerId === playerId)) {
-    if (tr.words.length > 0) {
-      for (const w of tr.words) items.push({ t: w.start, w: w.w });
-    } else if (tr.text) {
-      const turn = data.turns.find((t) => t.id === tr.turnId);
-      if (turn?.questionEnd) items.push({ t: turn.questionEnd, w: `“${clip(tr.text, 40)}”` });
-    }
+/** The answer's text with each filler word highlighted. */
+function withFillers(text: string) {
+  const parts: (string | ReactElement)[] = [];
+  let last = 0;
+  for (const m of text.matchAll(FILLER_RE)) {
+    parts.push(text.slice(last, m.index));
+    parts.push(
+      <mark key={m.index} className="filler">
+        {m[0]}
+      </mark>,
+    );
+    last = m.index + m[0].length;
   }
-  const lastEnd = [-Infinity, -Infinity];
-  return (
-    <>
-      {items.map((item, i) => {
-        const px = x(item.t);
-        const row = px > lastEnd[0]! ? 0 : px > lastEnd[1]! ? 1 : i % 2;
-        lastEnd[row] = px + item.w.length * 5.6 + 4;
-        return (
-          <text key={`${item.t}-${i}`} x={px} y={y + row * 12} className={`word-label ${FILLER.test(item.w) ? 'filler' : ''}`}>
-            {item.w}
-          </text>
-        );
-      })}
-    </>
-  );
+  parts.push(text.slice(last));
+  return parts;
 }
 
-function clip(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+/** "1.2 s to start · 2 fillers · 1 pause", from what the server measured. */
+function answerFacts(answer: AnswerResult | undefined): string[] {
+  if (!answer) return [];
+  const m = answer.metrics;
+  const facts: string[] = [];
+  facts.push(m.rtMs === null ? 'Never started talking' : `${(m.rtMs / 1000).toFixed(1)} s to start`);
+  if (m.fillers !== null) facts.push(`${m.fillers} ${m.fillers === 1 ? 'filler' : 'fillers'}`);
+  if (m.pauseCount !== null) facts.push(`${m.pauseCount} ${m.pauseCount === 1 ? 'pause' : 'pauses'}`);
+  if (m.pitchShiftSt !== null) facts.push(`pitch ${m.pitchShiftSt >= 0 ? '+' : '−'}${Math.abs(m.pitchShiftSt).toFixed(1)} st`);
+  return facts;
 }

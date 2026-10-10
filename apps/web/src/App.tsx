@@ -7,17 +7,26 @@ import { Play } from './pages/Play';
 const Host = lazy(() => import('./pages/Host').then((m) => ({ default: m.Host })));
 const EvidenceBoard = lazy(() => import('./host/EvidenceBoard').then((m) => ({ default: m.EvidenceBoard })));
 
+/** The big screen and the replay sit on the dark stage; everything else is light. */
+export function surfaceFor(path: string): 'light' | 'dark' {
+  return /^\/(host|replay)\//.test(path) ? 'dark' : 'light';
+}
+
 function Message({ title, body }: { title: string; body: string }) {
   return (
-    <main className="center-page">
-      <h1 className="wordmark">DEADPAN</h1>
-      <h2>{title}</h2>
-      <p className="muted">{body}</p>
-      <a className="button" href="/">
+    <main className="message-page">
+      <span className="wordmark">DEADPAN</span>
+      <h1 className="message-title">{title}</h1>
+      <p className="lead">{body}</p>
+      <a className="btn black" href="/">
         Back to start
       </a>
     </main>
   );
+}
+
+function Loading({ text }: { text: string }) {
+  return <main className="loading-page">{text}</main>;
 }
 
 export function App() {
@@ -25,15 +34,15 @@ export function App() {
   if (path === '/') return <Landing />;
 
   const match = path.match(/^\/(host|play|replay)\/([^/]+)(?:\/(\d+))?\/?$/);
-  if (!match) return <Message title="Nothing here" body="That page doesn't exist." />;
+  if (!match) return <Message title="Nothing here." body="That page doesn't exist." />;
 
   const [, kind, rawCode, round] = match;
   const code = normalizeRoomCode(decodeURIComponent(rawCode!));
-  if (!code) return <Message title="Bad room code" body="Room codes are 4 letters, like KTXB." />;
+  if (!code) return <Message title="Bad room code." body="Room codes are 4 letters, like KTXB." />;
 
   if (kind === 'host' && !round) {
     return (
-      <Suspense fallback={<main className="center-page muted">Loading the big screen…</main>}>
+      <Suspense fallback={<Loading text="Loading the big screen…" />}>
         <Host code={code} />
       </Suspense>
     );
@@ -41,15 +50,12 @@ export function App() {
   if (kind === 'play' && !round) return <Play code={code} />;
   if (kind === 'replay' && round) {
     return (
-      <Suspense fallback={<main className="center-page muted">Loading the evidence board…</main>}>
+      <Suspense fallback={<Loading text="Loading the evidence board…" />}>
         <main className="replay-page">
-          <EvidenceBoard room={code} round={Number(round)} />
-          <a className="button" href={`/host/${code}`}>
-            Back to room {code}
-          </a>
+          <EvidenceBoard room={code} round={Number(round)} onClose={() => location.assign(`/host/${code}`)} closeLabel={`Back to room ${code}`} />
         </main>
       </Suspense>
     );
   }
-  return <Message title="Nothing here" body="That page doesn't exist." />;
+  return <Message title="Nothing here." body="That page doesn't exist." />;
 }
