@@ -1,0 +1,23 @@
+# Private planning notes: never push
+PLAN.md
+
+# Dependencies and builds
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+vite.config.ts.timestamp-*
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime logs
+rounds.jsonl
+*.log
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/

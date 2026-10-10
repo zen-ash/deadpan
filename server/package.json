@@ -1,0 +1,23 @@
+{
+  "name": "@deadpan/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "start": "NODE_ENV=production tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "@deadpan/shared": "workspace:*",
+    "express": "^5.3.0",
+    "tsx": "^4.23.15",
+    "ws": "^8.22.0"
+  }
+}

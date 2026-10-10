@@ -1,0 +1,79 @@
+import { existsSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
+import { WS_PATH } from '@deadpan/shared';
+import { createSocketServer } from './rooms';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const webRoot = resolve(repoRoot, 'apps/web');
+const envFile = resolve(repoRoot, '.env');
+if (existsSync(envFile)) process.loadEnvFile(envFile);
+
+const isProd = process.env.NODE_ENV === 'production';
+const port = Number(process.env.PORT) || 3000;
+
+const app = express();
+app.disable('x-powered-by');
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true });
+});
+
+const server = createServer(app);
+const sockets = createSocketServer();
+
+server.on('upgrade', (req, socket, head) => {
+  const { pathname } = new URL(req.url ?? '/', 'http://localhost');
+  if (pathname === WS_PATH) sockets.handleUpgrade(req, socket, head);
+  // In dev, Vite's HMR socket listens on the same server and takes the other upgrades.
+  else if (isProd) socket.destroy();
+});
+
+let closeVite: (() => Promise<void>) | undefined;
+
+if (isProd) {
+  const dist = resolve(webRoot, 'dist');
+  if (!existsSync(resolve(dist, 'index.html'))) {
+    console.error(`No web build at ${dist}. Run "pnpm build" first.`);
+    process.exit(1);
+  }
+  // Hashed bundles never change, so browsers can keep them forever.
+  // Missing ones 404 instead of falling through to index.html.
+  app.use('/assets', express.static(resolve(dist, 'assets'), { immutable: true, maxAge: '1y', fallthrough: false }));
+  app.use(express.static(dist, { index: false }));
+  // Every other GET is a client-side route: /, /host/:room, /play/:room, /replay/:room/:round.
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(resolve(dist, 'index.html'));
+  });
+} else {
+  const { createServer: createVite } = await import('vite');
+  const vite = await createVite({
+    root: webRoot,
+    configFile: resolve(webRoot, 'vite.config.ts'),
+    // tsx already handles TypeScript, so import the config directly. The default loader writes
+    // a temp file next to it, which tsx watch sees and restarts on, forever.
+    configLoader: 'native',
+    appType: 'spa',
+    server: { middlewareMode: true, ws: { server } },
+  });
+  app.use(vite.middlewares);
+  closeVite = () => vite.close();
+}
+
+server.listen(port, () => {
+  console.log(`Deadpan ${isProd ? 'production' : 'dev'} server on http://localhost:${port}`);
+});
+
+async function shutdown() {
+  setTimeout(() => process.exit(0), 1000).unref();
+  for (const ws of sockets.wss.clients) ws.terminate();
+  sockets.wss.close();
+  server.close();
+  await closeVite?.();
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());

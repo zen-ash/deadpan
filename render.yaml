@@ -1,0 +1,22 @@
+# Render Blueprint: one Node web service that serves the built web app and the WebSocket.
+services:
+  - type: web
+    name: deadpan
+    runtime: node
+    plan: starter # Free instances sleep and take ~50 s to wake.
+    region: virginia
+    # pnpm runs through npx, so the build doesn't depend on Render detecting pnpm.
+    buildCommand: npx --yes pnpm@10.17.1 install --frozen-lockfile && npx --yes pnpm@10.17.1 run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false

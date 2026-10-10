@@ -1,0 +1,22 @@
+{
+  "name": "deadpan",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @deadpan/server dev",
+    "build": "pnpm --filter @deadpan/web build",
+    "start": "NODE_ENV=production tsx server/src/index.ts",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
