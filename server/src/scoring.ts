@@ -264,8 +264,10 @@ export function localVerdict(
     accusedId: accused.playerId,
     correct: accused.playerId === imposterId,
     source: 'local',
+    confidence: null,
     scores,
     evidence: evidenceFor(accused, scored.filter((a) => a.playerId === accused.playerId), baselines.get(accused.playerId)),
+    spoken: '',
   };
 }
 

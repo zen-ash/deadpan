@@ -19,7 +19,18 @@ export function GamePanel({ game, playerId, players, secret, verdict, serverNow,
   if (!game || game.phase === 'lobby') {
     return <p className="muted">Waiting for the host to start the round. Look at the big screen.</p>;
   }
-  if (game.phase === 'verdict' && verdict) return <VerdictCard verdict={verdict} playerId={playerId} name={name} />;
+  if (game.phase === 'verdict') {
+    if (game.verdictStage === 'revealed' && verdict) return <VerdictCard verdict={verdict} playerId={playerId} name={name} />;
+    if (game.verdictStage === 'accusing' && verdict) {
+      return (
+        <div className="verdict-card">
+          <p className="muted">The detective accuses</p>
+          <strong className="accused">{name(verdict.accusedId)}</strong>
+        </div>
+      );
+    }
+    return <p className="phase-note">The detective is deliberating…</p>;
+  }
   if (!playerId || !game.roundPlayers.includes(playerId)) {
     return <p className="muted">A round is in progress. You'll play in the next one.</p>;
   }

@@ -1,9 +1,9 @@
-import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type Verdict } from '@deadpan/shared';
+import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type SpokenLine, type Verdict } from '@deadpan/shared';
 import QRCode from 'qrcode';
 import { useEffect, useRef, useState } from 'react';
+import { HostAudio } from '../host/audio';
 import { Interrogation } from '../host/Interrogation';
 import { live } from '../host/live';
-import { speakLine } from '../host/speech';
 import { SuspectCard } from '../host/SuspectCard';
 import { RoomSocket } from '../lib/socket';
 
@@ -12,7 +12,11 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export function Host({ code }: { code: string }) {
   const socketRef = useRef<RoomSocket | null>(null);
   const roundRef = useRef(0);
-  const spokenRef = useRef<string | null>(null);
+  const [audio] = useState(() => new HostAudio());
+  const [soundOn, setSoundOn] = useState(false);
+  const [soundBlocked, setSoundBlocked] = useState(false);
+  /** What the detective is saying right now, for subtitles. */
+  const [line, setLine] = useState<SpokenLine | null>(null);
   const [connected, setConnected] = useState(false);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [qr, setQr] = useState('');
@@ -44,7 +48,12 @@ export function Host({ code }: { code: string }) {
               setVerdict(null);
               setTranscript(null);
             }
-            if (msg.phase === 'lobby') setVerdict(null);
+            if (msg.phase === 'lobby') {
+              setVerdict(null);
+              setLine(null);
+              audio.stopLines();
+            }
+            audio.setRoomTone(msg.phase !== 'lobby');
             setGame(msg);
             setNotice('');
             break;
@@ -57,6 +66,19 @@ export function Host({ code }: { code: string }) {
           case 'live_transcript':
             setTranscript({ turnId: msg.turnId, text: msg.text });
             break;
+          case 'say': {
+            const spoken = msg.line;
+            setLine(spoken);
+            // Report the moment the line finished: the answer's response time counts from there.
+            audio.say(spoken, (at) => {
+              socket.send({ t: 'tts_end', lineId: spoken.id, at: socket.clock.toServer(at) });
+              setLine((current) => (current?.id === spoken.id ? null : current));
+            });
+            break;
+          }
+          case 'sfx':
+            audio.sfx(msg.name);
+            break;
           case 'error':
             setNotice(msg.message);
             break;
@@ -67,24 +89,25 @@ export function Host({ code }: { code: string }) {
       onBinary: (data) => live.handleMesh(data),
     });
     socketRef.current = socket;
+    audio.onBlocked = () => setSoundBlocked(true);
     return () => {
       socket.close();
       socketRef.current = null;
+      audio.stopLines();
+      audio.setRoomTone(false);
     };
-  }, [code]);
+  }, [code, audio]);
 
-  // Read each new line aloud, then report the moment it finished: response time counts from there.
-  const turn = game?.turn;
-  useEffect(() => {
-    if (!turn || turn.stage !== 'asking' || spokenRef.current === turn.id) return;
-    spokenRef.current = turn.id;
-    void speakLine(turn.text).then(() => {
-      const socket = socketRef.current;
-      socket?.send({ t: 'tts_end', lineId: turn.id, at: socket.clock.toServer(Date.now()) });
-    });
-  }, [turn]);
-
-  const send = (t: 'start_round' | 'end_round') => socketRef.current?.send({ t });
+  const enableSound = () => {
+    audio.unlock();
+    setSoundOn(true);
+    setSoundBlocked(false);
+  };
+  const send = (t: 'start_round' | 'end_round') => {
+    // Starting a round is a click, which is what browsers need before they play sound.
+    if (t === 'start_round') enableSound();
+    socketRef.current?.send({ t });
+  };
   const inRound = !!game && game.phase !== 'lobby';
   const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
   const lastAnswer = (id: string) => answers.findLast((a) => a.playerId === id);
@@ -97,6 +120,7 @@ export function Host({ code }: { code: string }) {
           <Interrogation
             game={game}
             verdict={verdict}
+            line={line}
             transcript={transcript && transcript.turnId === game.turn?.id ? transcript.text : ''}
             serverNow={() => socketRef.current?.clock.now() ?? Date.now()}
             name={name}
@@ -122,6 +146,11 @@ export function Host({ code }: { code: string }) {
           </>
         )}
         {notice && <p className="banner bad">{notice}</p>}
+        {!soundOn && (inRound || soundBlocked) && (
+          <button className="button primary" onClick={enableSound}>
+            Turn on the detective's voice
+          </button>
+        )}
       </section>
 
       <section className="host-players">

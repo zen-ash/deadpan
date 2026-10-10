@@ -1,6 +1,8 @@
-// The Imposter round, run by the server:
-// lobby → baseline → deal → (question → answer) × 2 per player → follow-up → verdict → lobby.
-// Every wait has a timeout, so a round always finishes even if the big screen or Scribe goes quiet.
+// The Imposter round, run by the server as one script:
+// intro → baseline → deal → (question → answer) × 2 per player → Gemini follow-up →
+// drumroll while Gemini decides → spoken verdict → reveal.
+// Every wait has a timeout, and ending the round cancels whatever is pending, so a round always
+// finishes even if the big screen, Scribe, Gemini or ElevenLabs goes quiet.
 import { randomUUID } from 'node:crypto';
 import {
   ANSWER_CAP_MS,
@@ -15,25 +17,33 @@ import {
   type TurnInfo,
   type TurnKind,
   type Verdict,
+  type VerdictStage,
 } from '@deadpan/shared';
 import type { WebSocket } from 'ws';
+import { canned, dynamic, sfxMs, type Line } from './audio';
+import * as detective from './detective';
+import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
 import { answerMetrics, buildBaseline, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
 import { scribeUrl } from './scribe';
-import { BASELINE_QUESTIONS, FOLLOWUPS, QUESTIONS, pickWord, shuffled } from './words';
+import { pickWord, shuffled } from './words';
 
-const BASELINE_PER_PLAYER = 1;
 const QUESTIONS_PER_PLAYER = 2;
-/** If the big screen never reports that a line finished, assume it did after this extra time. */
-const TTS_GRACE_MS = 4000;
+/** Extra time a line may take beyond its expected length before the round moves on anyway. */
+const LINE_GRACE_MS = 4000;
 /** How long to wait for Scribe's final transcript once an answer ends. */
 const TRANSCRIPT_GRACE_MS = 1500;
 const MAX_WORDS = 400;
 
+interface Run {
+  id: number;
+  aborted: boolean;
+}
+
 interface PlannedTurn {
   kind: TurnKind;
   playerId: string;
-  text: string;
+  line: Line;
   index: number;
   total: number;
 }
@@ -51,6 +61,8 @@ interface ActiveTurn {
   scored: boolean;
   timers: Set<NodeJS.Timeout>;
   silenceTimer?: NodeJS.Timeout;
+  /** Resolves the turn's promise in the round script. */
+  settle: () => void;
 }
 
 export class ImposterGame {
@@ -58,15 +70,19 @@ export class ImposterGame {
   private round = 0;
   private roundPlayers: string[] = [];
   private dealEndsAt: number | null = null;
+  private verdictStage: VerdictStage | null = null;
   private word: string | null = null;
   private imposterId: string | null = null;
-  private queue: PlannedTurn[] = [];
   private turn: ActiveTurn | null = null;
   private answers: AnswerResult[] = [];
   private readonly baselineWindows = new Map<string, Window[]>();
   private readonly baselines = new Map<string, Baseline>();
   private verdict: Verdict | null = null;
-  private phaseTimer: NodeJS.Timeout | undefined;
+  private run: Run | null = null;
+  /** Everything the round script is waiting on; ending the round resolves them all. */
+  private readonly cancels = new Set<() => void>();
+  private pendingLine: { id: string; done: (at: number) => void } | null = null;
+  private lineSeq = 0;
 
   constructor(private readonly room: Room) {}
 
@@ -77,6 +93,7 @@ export class ImposterGame {
       roundPlayers: this.roundPlayers,
       turn: this.turn?.info ?? null,
       dealEndsAt: this.dealEndsAt,
+      verdictStage: this.verdictStage,
     };
   }
 
@@ -92,42 +109,219 @@ export class ImposterGame {
     const players = [...this.room.players.values()];
     if (players.length === 0) return 'Nobody has joined yet.';
 
+    this.cancelRun();
     this.reset();
     this.round++;
     this.roundPlayers = players.map((p) => p.id);
-    this.phase = 'baseline';
-    const softballs = shuffled(BASELINE_QUESTIONS);
-    const total = players.length * BASELINE_PER_PLAYER;
-    this.queue = players.flatMap((p, i) =>
-      Array.from({ length: BASELINE_PER_PLAYER }, (_, k) => ({
-        kind: 'baseline' as const,
-        playerId: p.id,
-        text: softballs[(i * BASELINE_PER_PLAYER + k) % softballs.length]!,
-        index: i * BASELINE_PER_PLAYER + k + 1,
-        total,
-      })),
-    );
+    const run: Run = { id: this.round, aborted: false };
+    this.run = run;
     this.log(`round ${this.round} started with ${players.map((p) => p.name).join(', ')}`);
-    this.nextTurn();
+    void this.play(run).catch((err: unknown) => {
+      console.error(`[room ${this.room.code}] round crashed:`, err);
+      if (this.run === run) this.end();
+    });
     return null;
   }
 
   /** Back to the lobby, from the verdict or mid-round. */
   end() {
+    this.cancelRun();
     this.reset();
     this.phase = 'lobby';
     this.broadcastState();
   }
 
   dispose() {
+    this.cancelRun();
     this.reset();
   }
 
-  onTtsEnd(lineId: string, at: number) {
-    const turn = this.turn;
-    if (!turn || turn.info.id !== lineId || turn.info.stage !== 'asking') return;
+  // The round script
+
+  private async play(run: Run) {
+    const live = () => this.run === run && !run.aborted;
+
+    this.setPhase('baseline');
+    await this.say(run, canned(intro(this.roundPlayers.length)));
+    const softballs = shuffled(BASELINE);
+    const calibrating = [...this.roundPlayers];
+    for (const [i, playerId] of calibrating.entries()) {
+      if (!live()) return;
+      await this.playTurn(run, { kind: 'baseline', playerId, line: canned(softballs[i % softballs.length]!), index: i + 1, total: calibrating.length });
+    }
+
+    if (!live()) return;
+    if (!this.deal()) return this.end();
+    await Promise.all([this.say(run, canned(DEAL)), this.sleep(run, DEAL_MS)]);
+
+    if (!live()) return;
+    this.dealEndsAt = null;
+    this.setPhase('question');
+    const pool = shuffled(QUESTIONS);
+    const total = QUESTIONS_PER_PLAYER * this.roundPlayers.length;
+    let asked = 0;
+    // Round-robin, so everyone answers once before anyone answers twice.
+    for (let r = 0; r < QUESTIONS_PER_PLAYER; r++) {
+      for (const playerId of [...this.roundPlayers]) {
+        if (!live()) return;
+        if (!this.roundPlayers.includes(playerId)) continue;
+        await this.playTurn(run, { kind: 'question', playerId, line: canned(pool[asked % pool.length]!), index: ++asked, total });
+      }
+    }
+
+    if (!live()) return;
+    this.setPhase('followup');
+    const followUp = await this.prepareFollowUp();
+    if (!live()) return;
+    if (followUp) await this.playTurn(run, { kind: 'followup', ...followUp, index: 1, total: 1 });
+
+    if (!live()) return;
+    await this.decide(run);
+  }
+
+  /** Gemini picks who to grill and writes the line; the fallback grills whoever drifted most. */
+  private async prepareFollowUp(): Promise<{ playerId: string; line: Line } | null> {
+    const fromGemini = await detective.followUp(this.context());
+    if (fromGemini && this.roundPlayers.includes(fromGemini.targetId)) {
+      const line = await dynamic(fromGemini.spoken);
+      return { playerId: fromGemini.targetId, line: line ?? canned(pick(FOLLOWUP_FALLBACKS)) };
+    }
+    const scored = this.answers.filter((a) => a.kind === 'question');
+    const ranked = shuffled(this.roundPlayers).sort((a, b) => (meanDelivery(scored, b) ?? -Infinity) - (meanDelivery(scored, a) ?? -Infinity));
+    return ranked[0] ? { playerId: ranked[0], line: canned(pick(FOLLOWUP_FALLBACKS)) } : null;
+  }
+
+  /** Drumroll while Gemini decides (SPEC: the verdict call starts at the drumroll), then the reveal. */
+  private async decide(run: Run) {
+    const live = () => this.run === run && !run.aborted;
+    this.verdictStage = 'deliberating';
+    this.setPhase('verdict');
+    await this.say(run, canned(HEARD_ENOUGH));
+    if (!live()) return;
+
+    sendToHosts(this.room, { t: 'sfx', name: 'drumroll' });
+    const players = this.roundPlayers.map((id) => ({ id, name: this.name(id) }));
+    const local = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
+    const [fromGemini] = await Promise.all([detective.verdict(this.context(), local.scores), this.sleep(run, sfxMs('drumroll'))]);
+    if (!live()) return;
+
+    let verdict: Verdict;
+    let spoken: string;
+    if (fromGemini) {
+      spoken = fromGemini.spoken;
+      verdict = {
+        ...local,
+        accusedId: fromGemini.accusedId,
+        correct: fromGemini.accusedId === this.imposterId,
+        source: 'gemini',
+        confidence: fromGemini.confidence,
+        evidence: fromGemini.evidence.length > 0 ? fromGemini.evidence : local.evidence,
+        spoken: '',
+      };
+    } else {
+      spoken = `[low, gravelly] I've watched every one of you. [pause] The imposter... is ${this.name(local.accusedId)}.`;
+      verdict = local;
+    }
+    const line = (await dynamic(spoken)) ?? canned(pick(VERDICT_FALLBACKS));
+    if (!live()) return;
+    verdict.spoken = line.text;
+    this.verdict = verdict;
+    this.verdictStage = 'accusing';
+    this.broadcastState();
+    broadcast(this.room, { t: 'verdict', ...verdict });
+    await this.say(run, line);
+
+    if (!live()) return;
+    this.verdictStage = 'revealed';
+    this.broadcastState();
+    sendToHosts(this.room, { t: 'sfx', name: 'stinger' });
+    await this.say(run, canned(pick(verdict.correct ? CASE_CLOSED : YOU_GOT_ME)));
+    if (verdict.correct && live()) sendToHosts(this.room, { t: 'sfx', name: 'caseclosed' });
+    this.log(
+      `verdict (${verdict.source}): accused ${this.name(verdict.accusedId)}, imposter was ${this.name(verdict.imposterId)}, ` +
+        `word "${verdict.word}" (${verdict.correct ? 'caught' : 'missed'})`,
+    );
+  }
+
+  private deal(): boolean {
     const now = Date.now();
-    this.startAnswer(turn, Math.abs(at - now) < 3000 ? at : now);
+    this.roundPlayers = this.roundPlayers.filter((id) => this.room.players.has(id));
+    if (this.roundPlayers.length === 0) return false;
+    for (const id of this.roundPlayers) {
+      const player = this.room.players.get(id)!;
+      const softballs = this.answers.filter((a) => a.playerId === id && a.kind === 'baseline').map((a) => a.metrics);
+      this.baselines.set(id, buildBaseline(softballs, player.samples, this.baselineWindows.get(id) ?? [], now));
+    }
+    this.word = pickWord();
+    this.imposterId = this.roundPlayers[Math.floor(Math.random() * this.roundPlayers.length)]!;
+    this.dealEndsAt = now + DEAL_MS;
+    for (const id of this.roundPlayers) {
+      send(this.room.players.get(id)!.ws, { t: 'secret', word: id === this.imposterId ? null : this.word });
+    }
+    this.setPhase('deal');
+    return true;
+  }
+
+  // One turn: the question plays, the answer is timed, then scored.
+
+  private async playTurn(run: Run, planned: PlannedTurn): Promise<void> {
+    const player = this.room.players.get(planned.playerId);
+    if (!player || !this.roundPlayers.includes(planned.playerId)) return;
+
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => (settle = resolve));
+    const turn: ActiveTurn = {
+      info: {
+        id: randomUUID(),
+        kind: planned.kind,
+        playerId: planned.playerId,
+        text: planned.line.text,
+        stage: 'asking',
+        index: planned.index,
+        total: planned.total,
+        questionEnd: null,
+        answerDeadline: null,
+      },
+      scribe: false,
+      heardSpeech: false,
+      lastSpeechEnd: null,
+      answerEnd: null,
+      words: [],
+      text: '',
+      final: false,
+      scored: false,
+      timers: new Set(),
+      settle: () => {
+        this.cancels.delete(turn.settle);
+        settle();
+      },
+    };
+    this.cancels.add(turn.settle);
+    this.turn = turn;
+    this.broadcastState();
+
+    // The phone opens its Scribe socket while the question plays, so no words are lost.
+    void scribeUrl().then((url) => {
+      if (!url || this.turn !== turn || turn.info.stage === 'scoring') return;
+      turn.scribe = true;
+      send(player.ws, { t: 'scribe', turnId: turn.info.id, url });
+    });
+
+    const questionEnd = await this.say(run, planned.line);
+    if (this.turn === turn && turn.info.stage === 'asking') this.startAnswer(turn, questionEnd);
+    else turn.settle();
+    await settled;
+    if (this.turn === turn) this.turn = null;
+  }
+
+  private startAnswer(turn: ActiveTurn, questionEnd: number) {
+    turn.info.stage = 'answering';
+    turn.info.questionEnd = questionEnd;
+    turn.info.answerDeadline = questionEnd + ANSWER_CAP_MS;
+    const player = this.room.players.get(turn.info.playerId);
+    if (player) send(player.ws, { t: 'your_turn', turnId: turn.info.id, questionEnd });
+    this.broadcastState();
+    this.after(turn, turn.info.answerDeadline - Date.now(), () => this.finishAnswer(turn, 'cap'));
   }
 
   onSpeech(player: Player, on: boolean, at: number) {
@@ -162,6 +356,12 @@ export class ImposterGame {
     if (turn && turn.info.id === turnId && turn.info.playerId === player.id) this.finishAnswer(turn, 'done');
   }
 
+  onTtsEnd(lineId: string, at: number) {
+    if (this.pendingLine?.id !== lineId) return;
+    const now = Date.now();
+    this.pendingLine.done(Math.abs(at - now) < 5000 ? at : now);
+  }
+
   onPlayerLeft(playerId: string) {
     if (!this.roundPlayers.includes(playerId)) return;
     this.roundPlayers = this.roundPlayers.filter((id) => id !== playerId);
@@ -171,73 +371,18 @@ export class ImposterGame {
       this.end();
       return;
     }
-    this.queue = this.queue.filter((t) => t.playerId !== playerId);
-    if (this.turn?.info.playerId === playerId) {
-      this.clearTurn(this.turn);
-      this.nextTurn();
-    } else {
-      this.broadcastState();
+    const turn = this.turn;
+    if (turn?.info.playerId === playerId) {
+      this.clearTimers(turn);
+      this.turn = null;
+      turn.settle();
     }
-  }
-
-  // Turn flow
-
-  private nextTurn(): void {
-    if (this.turn) this.clearTurn(this.turn);
-    this.turn = null;
-    const planned = this.queue.shift();
-    if (planned) return this.beginTurn(planned);
-    if (this.phase === 'baseline') return this.deal();
-    if (this.phase === 'question') return this.followUp();
-    if (this.phase === 'followup') return this.decide();
-  }
-
-  private beginTurn(planned: PlannedTurn): void {
-    const player = this.room.players.get(planned.playerId);
-    if (!player || !this.roundPlayers.includes(planned.playerId)) return this.nextTurn();
-
-    const turn: ActiveTurn = {
-      info: { id: randomUUID(), ...planned, stage: 'asking', questionEnd: null, answerDeadline: null },
-      scribe: false,
-      heardSpeech: false,
-      lastSpeechEnd: null,
-      answerEnd: null,
-      words: [],
-      text: '',
-      final: false,
-      scored: false,
-      timers: new Set(),
-    };
-    this.turn = turn;
     this.broadcastState();
-
-    // The phone opens its Scribe socket while the question plays, so no words are lost.
-    void scribeUrl().then((url) => {
-      if (!url || this.turn !== turn || turn.info.stage === 'scoring') return;
-      turn.scribe = true;
-      send(player.ws, { t: 'scribe', turnId: turn.info.id, url });
-    });
-
-    // The big screen reports when the line finishes (tts_end). If it never does, carry on.
-    const estimate = Math.max(1500, turn.info.text.split(/\s+/).length * 400);
-    this.after(turn, estimate + TTS_GRACE_MS, () => this.startAnswer(turn, Date.now()));
   }
 
-  private startAnswer(turn: ActiveTurn, questionEnd: number) {
-    if (this.turn !== turn || turn.info.stage !== 'asking') return;
-    this.clearTurn(turn);
-    turn.info.stage = 'answering';
-    turn.info.questionEnd = questionEnd;
-    turn.info.answerDeadline = questionEnd + ANSWER_CAP_MS;
-    const player = this.room.players.get(turn.info.playerId);
-    if (player) send(player.ws, { t: 'your_turn', turnId: turn.info.id, questionEnd });
-    this.broadcastState();
-    this.after(turn, turn.info.answerDeadline - Date.now(), () => this.finishAnswer(turn, 'cap'));
-  }
-
-  private finishAnswer(turn: ActiveTurn, reason: 'done' | 'silence' | 'cap'): void {
+  private finishAnswer(turn: ActiveTurn, reason: 'done' | 'silence' | 'cap') {
     if (this.turn !== turn || turn.info.stage !== 'answering') return;
-    this.clearTurn(turn);
+    this.clearTimers(turn);
     const now = Date.now();
     turn.answerEnd = reason === 'silence' && turn.lastSpeechEnd ? Math.min(now, turn.lastSpeechEnd + 300) : now;
     turn.info.stage = 'scoring';
@@ -249,10 +394,10 @@ export class ImposterGame {
     this.after(turn, TRANSCRIPT_GRACE_MS, () => this.scoreTurn(turn));
   }
 
-  private scoreTurn(turn: ActiveTurn): void {
+  private scoreTurn(turn: ActiveTurn) {
     if (this.turn !== turn || turn.info.stage !== 'scoring' || turn.scored) return;
     turn.scored = true;
-    this.clearTurn(turn);
+    this.clearTimers(turn);
     const { id, playerId, kind, text } = turn.info;
     const player = this.room.players.get(playerId);
     if (player) {
@@ -269,75 +414,68 @@ export class ImposterGame {
       this.answers.push(result);
       sendToHosts(this.room, { t: 'answer', ...result });
       const rt = metrics.rtMs === null ? 'no speech' : `rt ${(metrics.rtMs / 1000).toFixed(2)} s`;
-      const delivery = result.delivery === null ? '' : `, delivery ${result.delivery.toFixed(2)}`;
-      this.log(`${player.name} ${kind}: ${rt}, ${metrics.words} words${delivery}`);
+      const drift = result.delivery === null ? '' : `, drift ${result.delivery.toFixed(2)}`;
+      this.log(`${player.name} ${kind}: ${rt}, ${metrics.words} words${drift}`);
     }
-    this.nextTurn();
+    turn.settle();
   }
 
-  // Phases
+  // Waiting
 
-  private deal(): void {
-    const now = Date.now();
-    this.roundPlayers = this.roundPlayers.filter((id) => this.room.players.has(id));
-    if (this.roundPlayers.length === 0) return this.end();
-    for (const id of this.roundPlayers) {
-      const player = this.room.players.get(id)!;
-      const softballs = this.answers.filter((a) => a.playerId === id && a.kind === 'baseline').map((a) => a.metrics);
-      this.baselines.set(id, buildBaseline(softballs, player.samples, this.baselineWindows.get(id) ?? [], now));
-    }
-
-    this.word = pickWord();
-    this.imposterId = this.roundPlayers[Math.floor(Math.random() * this.roundPlayers.length)]!;
-    this.phase = 'deal';
-    this.dealEndsAt = now + DEAL_MS;
-    for (const id of this.roundPlayers) {
-      send(this.room.players.get(id)!.ws, { t: 'secret', word: id === this.imposterId ? null : this.word });
-    }
-    this.broadcastState();
-    this.phaseTimer = setTimeout(() => this.askQuestions(), DEAL_MS);
+  /**
+   * Has the big screen play a line, and resolves with the server time it finished. Falls back to
+   * the line's expected length if no big screen reports back.
+   */
+  private say(run: Run, line: Line): Promise<number> {
+    if (this.run !== run || run.aborted) return Promise.resolve(Date.now());
+    const id = `${line.id}~${++this.lineSeq}`;
+    return new Promise((resolve) => {
+      const done = (at: number) => {
+        clearTimeout(timer);
+        this.cancels.delete(cancel);
+        if (this.pendingLine?.id === id) this.pendingLine = null;
+        resolve(at);
+      };
+      const cancel = () => done(Date.now());
+      const timer = setTimeout(cancel, line.expectedMs + (this.room.hosts.size > 0 ? LINE_GRACE_MS : 0));
+      this.cancels.add(cancel);
+      this.pendingLine = { id, done };
+      sendToHosts(this.room, { t: 'say', line: { id, url: line.url, text: line.text } });
+    });
   }
 
-  private askQuestions() {
-    this.phase = 'question';
-    this.dealEndsAt = null;
-    const pool = shuffled(QUESTIONS);
-    const total = QUESTIONS_PER_PLAYER * this.roundPlayers.length;
-    this.queue = [];
-    // Round-robin, so everyone answers once before anyone answers twice.
-    for (let r = 0; r < QUESTIONS_PER_PLAYER; r++) {
-      for (const playerId of this.roundPlayers) {
-        this.queue.push({ kind: 'question', playerId, text: pool[this.queue.length % pool.length]!, index: this.queue.length + 1, total });
-      }
-    }
-    this.nextTurn();
-  }
-
-  private followUp(): void {
-    this.phase = 'followup';
-    // Grill whoever has drifted furthest from their own baseline so far.
-    const scored = this.answers.filter((a) => a.kind === 'question');
-    const ranked = shuffled(this.roundPlayers).sort((a, b) => (meanDelivery(scored, b) ?? -Infinity) - (meanDelivery(scored, a) ?? -Infinity));
-    const target = ranked[0];
-    if (!target) return this.end();
-    this.queue = [{ kind: 'followup', playerId: target, text: shuffled(FOLLOWUPS)[0]!, index: 1, total: 1 }];
-    this.nextTurn();
-  }
-
-  private decide() {
-    const players = this.roundPlayers.map((id) => ({ id, name: this.room.players.get(id)?.name ?? '?' }));
-    this.verdict = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
-    this.phase = 'verdict';
-    this.broadcastState();
-    broadcast(this.room, { t: 'verdict', ...this.verdict });
-    const name = (id: string) => this.room.players.get(id)?.name ?? '?';
-    this.log(
-      `verdict: accused ${name(this.verdict.accusedId)}, imposter was ${name(this.verdict.imposterId)}, ` +
-        `word "${this.verdict.word}" (${this.verdict.correct ? 'caught' : 'missed'})`,
-    );
+  private sleep(run: Run, ms: number): Promise<void> {
+    if (this.run !== run || run.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.cancels.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.cancels.add(done);
+    });
   }
 
   // Helpers
+
+  private context(): detective.DetectiveContext {
+    return {
+      word: this.word ?? '',
+      players: this.roundPlayers.map((id) => ({ id, name: this.name(id) })),
+      answers: this.answers,
+      baselines: this.baselines,
+    };
+  }
+
+  private name(id: string): string {
+    return this.room.players.get(id)?.name ?? 'someone';
+  }
+
+  private setPhase(phase: Phase) {
+    this.phase = phase;
+    this.broadcastState();
+  }
 
   private broadcastState() {
     broadcast(this.room, { t: 'state', ...this.state });
@@ -347,21 +485,28 @@ export class ImposterGame {
     turn.timers.add(setTimeout(fn, Math.max(0, ms)));
   }
 
-  private clearTurn(turn: ActiveTurn) {
+  private clearTimers(turn: ActiveTurn) {
     for (const t of turn.timers) clearTimeout(t);
     turn.timers.clear();
     clearTimeout(turn.silenceTimer);
   }
 
+  private cancelRun() {
+    if (this.run) this.run.aborted = true;
+    this.run = null;
+    for (const cancel of [...this.cancels]) cancel();
+    this.cancels.clear();
+  }
+
   private reset() {
-    if (this.turn) this.clearTurn(this.turn);
-    clearTimeout(this.phaseTimer);
+    if (this.turn) this.clearTimers(this.turn);
     this.turn = null;
-    this.queue = [];
+    this.pendingLine = null;
     this.answers = [];
     this.baselines.clear();
     this.baselineWindows.clear();
     this.verdict = null;
+    this.verdictStage = null;
     this.word = null;
     this.imposterId = null;
     this.dealEndsAt = null;
@@ -384,3 +529,4 @@ function sanitizeWords(words: unknown[]): TranscriptWord[] {
   }
   return out;
 }
+

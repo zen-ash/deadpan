@@ -41,7 +41,7 @@ export const ANSWER_CAP_MS = 15_000;
 export const SILENCE_END_MS = 2_500;
 /** Speech this soon after the question ends is the question's echo, not an answer. */
 export const MIN_RESPONSE_MS = 200;
-export const DEAL_MS = 7_000;
+export const DEAL_MS = 6_000;
 
 export interface PlayerInfo {
   id: string;
@@ -102,6 +102,9 @@ export interface TurnInfo {
   answerDeadline: number | null;
 }
 
+/** deliberating: drumroll while the detective decides. accusing: the verdict is spoken. revealed: the truth is out. */
+export type VerdictStage = 'deliberating' | 'accusing' | 'revealed';
+
 export interface GameState {
   phase: Phase;
   round: number;
@@ -110,7 +113,20 @@ export interface GameState {
   turn: TurnInfo | null;
   /** Server time the deal phase ends. */
   dealEndsAt: number | null;
+  verdictStage: VerdictStage | null;
 }
+
+/** Something the detective says, played by the big screen. */
+export interface SpokenLine {
+  id: string;
+  /** Streams the audio (ElevenLabs v4, or a cached canned line). */
+  url: string;
+  /** Subtitle text, with audio tags like [whispers] removed. */
+  text: string;
+}
+
+export type SfxName = 'drumroll' | 'stinger' | 'roomtone' | 'caseclosed';
+export const SFX_NAMES: readonly SfxName[] = ['drumroll', 'stinger', 'roomtone', 'caseclosed'];
 
 /** A word from Scribe, with start and end in server time (ms). */
 export interface TranscriptWord {
@@ -172,8 +188,12 @@ export interface Verdict {
   accusedId: string;
   correct: boolean;
   source: 'local' | 'gemini';
+  /** 0–1, from Gemini; null for the local fallback. */
+  confidence: number | null;
   scores: PlayerScore[];
   evidence: string[];
+  /** The spoken accusation, as subtitles. */
+  spoken: string;
 }
 
 export type ClientToServer =
@@ -212,6 +232,8 @@ export type ServerToClient =
   | { t: 'turn_over'; turnId: string }
   | ({ t: 'verdict' } & Verdict)
   // To hosts only.
+  | { t: 'say'; line: SpokenLine }
+  | { t: 'sfx'; name: SfxName }
   | ({ t: 'pf'; id: string } & FeaturesPacket)
   | { t: 'speech'; id: string; on: boolean; ts: number }
   | { t: 'live_transcript'; playerId: string; turnId: string; text: string; final: boolean }

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WS_PATH } from '@deadpan/shared';
 import { VENDOR_CONTENT_TYPES } from '../../apps/web/vendorAssets';
+import { prewarm, serveLine, serveSfx } from './audio';
+import { allCannedLines } from './lines';
 import { createSocketServer } from './rooms';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -20,6 +22,9 @@ app.disable('x-powered-by');
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
 });
+// The detective's lines and sound effects, played by the big screen.
+app.get('/api/line/:file', (req, res) => void serveLine(req, res));
+app.get('/api/sfx/:file', serveSfx);
 
 const server = createServer(app);
 const sockets = createSocketServer();
@@ -81,6 +86,8 @@ if (isProd) {
 
 server.listen(port, () => {
   console.log(`Deadpan ${isProd ? 'production' : 'dev'} server on http://localhost:${port}`);
+  // Fill the audio cache in the background; rounds can start straight away.
+  void prewarm(allCannedLines());
 });
 
 async function shutdown() {

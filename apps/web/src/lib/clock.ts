@@ -1,5 +1,6 @@
 // NTP-style clock sync with the server: offset = server time − local time, taken as the
-// median of the last five ping/pong exchanges.
+// median of the last five ping/pong exchanges. Exchanges that took much longer than the fastest
+// one are left out: a slow round trip is usually lopsided, which skews its offset.
 
 const SAMPLES = 5;
 
@@ -20,8 +21,10 @@ export class ClockSync {
     if (rtt < 0 || rtt > 10_000) return;
     this.samples.push({ offset: s + rtt / 2 - now, rtt });
     if (this.samples.length > SAMPLES) this.samples.shift();
-    this.offset = median(this.samples.map((x) => x.offset));
-    this.rtt = median(this.samples.map((x) => x.rtt));
+    const fastest = Math.min(...this.samples.map((x) => x.rtt));
+    const good = this.samples.filter((x) => x.rtt <= Math.max(fastest * 2, fastest + 100));
+    this.offset = median(good.map((x) => x.offset));
+    this.rtt = median(good.map((x) => x.rtt));
   }
 
   toServer(local: number): number {

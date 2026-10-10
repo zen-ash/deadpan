@@ -237,35 +237,6 @@ export function relatedHits(word: string, text: string): number {
   return tokens(text).filter((t) => related.has(t)).length;
 }
 
-// Placeholder detective lines until Gemini writes them in M3.
-
-export const BASELINE_QUESTIONS = [
-  'Say your name, and what you ate today.',
-  'Tell me your name, and where you grew up.',
-  "Say your name, and what you did this morning.",
-  "Tell me your name, and your favourite snack.",
-];
-
-export const QUESTIONS = [
-  'Describe it in three words.',
-  'When did you last see one?',
-  'Where would you usually find it?',
-  'What colour do you picture?',
-  'Who would want one?',
-  'What does it remind you of?',
-  'Is it bigger than a car? Explain.',
-  'What sound does it make?',
-  'Would you take it on holiday?',
-  'What would you do with one?',
-];
-
-export const FOLLOWUPS = [
-  'You hesitated. Tell me one more thing about it.',
-  "Hm. And how does it make you feel?",
-  'Interesting. Where did you first come across one?',
-  'Say that again, slower this time. What is it like?',
-];
-
 export function shuffled<T>(items: readonly T[]): T[] {
   const out = [...items];
   for (let i = out.length - 1; i > 0; i--) {

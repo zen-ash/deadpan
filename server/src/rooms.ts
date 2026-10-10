@@ -25,8 +25,13 @@ type Conn =
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 const HEARTBEAT_MS = 15_000;
 const MESH_BYTES = (MESH_HEADER + MESH_POINTS.length * 3) * 2;
-/** Phone timestamps further than this from the server clock are replaced with "now". */
-const MAX_CLOCK_SKEW_MS = 10_000;
+/**
+ * Speech events and "line finished" reports are sent the moment they happen, so their synced
+ * timestamps must land just before the message arrived. Outside these windows the sender's clock
+ * sync is off, and the server's receive time (less the usual detection delay) is used instead.
+ */
+const SPEECH_WINDOW = { before: 3000, after: 300, fallbackLag: 250 };
+const LINE_END_WINDOW = { before: 2000, after: 300, fallbackLag: 0 };
 
 const rooms = new Map<string, Room>();
 
@@ -76,11 +81,11 @@ function freeSlot(room: Room): number {
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const numOrNull = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** A phone or host timestamp in server time, or "now" if its clock sync looks wrong. */
-function serverTime(ts: unknown): number {
+/** A phone or host timestamp in server time, or the receive time if its clock sync looks wrong. */
+function eventTime(ts: unknown, window: { before: number; after: number; fallbackLag: number }): number {
   const now = Date.now();
   const t = num(ts);
-  return Math.abs(t - now) < MAX_CLOCK_SKEW_MS ? t : now;
+  return t >= now - window.before && t <= now + window.after ? t : now - window.fallbackLag;
 }
 
 /** Copies only the known fields, as numbers and booleans, so bad input can't reach the hosts. */
@@ -221,7 +226,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
     case 'speech_onset':
     case 'speech_end': {
       if (conn.role !== 'player') return conn;
-      const event = { at: serverTime(msg.ts), on: msg.t === 'speech_onset' };
+      const event = { at: eventTime(msg.ts, SPEECH_WINDOW), on: msg.t === 'speech_onset' };
       recordSpeech(conn.player, event);
       sendToHosts(conn.room, { t: 'speech', id: conn.player.id, on: event.on, ts: event.at });
       conn.room.game.onSpeech(conn.player, event.on, event.at);
@@ -248,7 +253,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       return conn;
 
     case 'tts_end':
-      if (conn.role === 'host') conn.room.game.onTtsEnd(String(msg.lineId), serverTime(msg.at));
+      if (conn.role === 'host') conn.room.game.onTtsEnd(String(msg.lineId), eventTime(msg.at, LINE_END_WINDOW));
       return conn;
 
     default:

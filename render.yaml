@@ -18,5 +18,3 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID
         sync: false
-      - key: DATABASE_URL
-        sync: false
