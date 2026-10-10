@@ -22,7 +22,7 @@ import {
 import type { WebSocket } from 'ws';
 import { canned, dynamic, sfxMs, type Line } from './audio';
 import * as detective from './detective';
-import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
+import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, HMM, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
 import { answerMetrics, buildBaseline, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
 import { scribeUrl } from './scribe';
@@ -46,6 +46,8 @@ interface PlannedTurn {
   line: Line;
   index: number;
   total: number;
+  /** Runs the moment the answer ends, before the final transcript and scoring. */
+  onAnswerEnd?: () => void;
 }
 
 interface ActiveTurn {
@@ -63,6 +65,7 @@ interface ActiveTurn {
   silenceTimer?: NodeJS.Timeout;
   /** Resolves the turn's promise in the round script. */
   settle: () => void;
+  onAnswerEnd?: () => void;
 }
 
 export class ImposterGame {
@@ -158,20 +161,31 @@ export class ImposterGame {
     this.dealEndsAt = null;
     this.setPhase('question');
     const pool = shuffled(QUESTIONS);
-    const total = QUESTIONS_PER_PLAYER * this.roundPlayers.length;
-    let asked = 0;
     // Round-robin, so everyone answers once before anyone answers twice.
+    const questions: PlannedTurn[] = [];
     for (let r = 0; r < QUESTIONS_PER_PLAYER; r++) {
-      for (const playerId of [...this.roundPlayers]) {
-        if (!live()) return;
-        if (!this.roundPlayers.includes(playerId)) continue;
-        await this.playTurn(run, { kind: 'question', playerId, line: canned(pool[asked % pool.length]!), index: ++asked, total });
+      for (const playerId of this.roundPlayers) {
+        questions.push({ kind: 'question', playerId, line: canned(pool[questions.length % pool.length]!), index: questions.length + 1, total: 0 });
       }
+    }
+    for (const q of questions) q.total = questions.length;
+
+    // The follow-up call starts the moment the last regular answer ends, with a "hmm" over it.
+    let thinking: Promise<[{ playerId: string; line: Line } | null, number]> | null = null;
+    const startThinking = () => {
+      thinking ??= Promise.all([this.prepareFollowUp(), this.say(run, canned(pick(HMM)))]);
+    };
+    for (const [i, question] of questions.entries()) {
+      if (!live()) return;
+      if (!this.roundPlayers.includes(question.playerId)) continue;
+      const isLast = !questions.slice(i + 1).some((q) => this.roundPlayers.includes(q.playerId));
+      await this.playTurn(run, { ...question, onAnswerEnd: isLast ? startThinking : undefined });
     }
 
     if (!live()) return;
     this.setPhase('followup');
-    const followUp = await this.prepareFollowUp();
+    startThinking();
+    const [followUp] = await thinking!;
     if (!live()) return;
     if (followUp) await this.playTurn(run, { kind: 'followup', ...followUp, index: 1, total: 1 });
 
@@ -295,6 +309,7 @@ export class ImposterGame {
         this.cancels.delete(turn.settle);
         settle();
       },
+      onAnswerEnd: planned.onAnswerEnd,
     };
     this.cancels.add(turn.settle);
     this.turn = turn;
@@ -390,6 +405,7 @@ export class ImposterGame {
     if (player) send(player.ws, { t: 'turn_over', turnId: turn.info.id });
     this.broadcastState();
     this.log(`${player?.name ?? '?'} finished answering (${reason})`);
+    turn.onAnswerEnd?.();
     if (!turn.scribe || turn.final) return this.scoreTurn(turn);
     this.after(turn, TRANSCRIPT_GRACE_MS, () => this.scoreTurn(turn));
   }
@@ -398,26 +414,33 @@ export class ImposterGame {
     if (this.turn !== turn || turn.info.stage !== 'scoring' || turn.scored) return;
     turn.scored = true;
     this.clearTimers(turn);
-    const { id, playerId, kind, text } = turn.info;
-    const player = this.room.players.get(playerId);
-    if (player) {
-      const window: Window = { start: turn.info.questionEnd!, end: turn.answerEnd! };
-      const baseline = this.baselines.get(playerId);
-      const metrics = answerMetrics(player.samples, player.speech, window, turn.words, turn.text, baseline?.pitchHz ?? null);
-      let scored: Pick<AnswerResult, 'z' | 'delivery'> = { z: null, delivery: null };
-      if (kind === 'baseline') {
-        this.baselineWindows.set(playerId, [...(this.baselineWindows.get(playerId) ?? []), window]);
-      } else if (baseline) {
-        scored = scoreAnswer(metrics, baseline);
+    const player = this.room.players.get(turn.info.playerId);
+    const result = this.measure(turn);
+    if (player && result) {
+      const { metrics } = result;
+      if (turn.info.kind === 'baseline') {
+        const window: Window = { start: turn.info.questionEnd!, end: turn.answerEnd! };
+        this.baselineWindows.set(player.id, [...(this.baselineWindows.get(player.id) ?? []), window]);
       }
-      const result: AnswerResult = { turnId: id, playerId, kind, question: text, metrics, ...scored };
       this.answers.push(result);
       sendToHosts(this.room, { t: 'answer', ...result });
       const rt = metrics.rtMs === null ? 'no speech' : `rt ${(metrics.rtMs / 1000).toFixed(2)} s`;
       const drift = result.delivery === null ? '' : `, drift ${result.delivery.toFixed(2)}`;
-      this.log(`${player.name} ${kind}: ${rt}, ${metrics.words} words${drift}`);
+      this.log(`${player.name} ${turn.info.kind}: ${rt}, ${metrics.words} words${drift}`);
     }
     turn.settle();
+  }
+
+  /** Measures an answer against the player's baseline. Works before the final transcript too. */
+  private measure(turn: ActiveTurn): AnswerResult | null {
+    const { id, playerId, kind, text } = turn.info;
+    const player = this.room.players.get(playerId);
+    if (!player || turn.info.questionEnd === null || turn.answerEnd === null) return null;
+    const window: Window = { start: turn.info.questionEnd, end: turn.answerEnd };
+    const baseline = this.baselines.get(playerId);
+    const metrics = answerMetrics(player.samples, player.speech, window, turn.words, turn.text, baseline?.pitchHz ?? null);
+    const scored = kind !== 'baseline' && baseline ? scoreAnswer(metrics, baseline) : { z: null, delivery: null };
+    return { turnId: id, playerId, kind, question: text, metrics, ...scored };
   }
 
   // Waiting
@@ -460,10 +483,14 @@ export class ImposterGame {
   // Helpers
 
   private context(): detective.DetectiveContext {
+    const answers = [...this.answers];
+    // An answer that just ended is still waiting for its final transcript; use what's there so far.
+    const pending = this.turn && this.turn.info.stage === 'scoring' && !this.turn.scored ? this.measure(this.turn) : null;
+    if (pending) answers.push(pending);
     return {
       word: this.word ?? '',
       players: this.roundPlayers.map((id) => ({ id, name: this.name(id) })),
-      answers: this.answers,
+      answers,
       baselines: this.baselines,
     };
   }

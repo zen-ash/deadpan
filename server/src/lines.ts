@@ -35,6 +35,9 @@ export const QUESTIONS = [
 
 export const HEARD_ENOUGH = "[low] I've heard enough. [pause] Let's see who's been lying.";
 
+/** Played while Gemini writes the follow-up, so the pause sounds like thinking. */
+export const HMM = ['[thoughtful] Hmm...', '[low] Mm-hm. [pause] Interesting.', '[thoughtful] Hmm. [pause] Let me think.'];
+
 // SPEC: 20 canned lines for when Gemini times out.
 
 /** Generic follow-ups, aimed at whoever drifted furthest (8). */
@@ -77,6 +80,7 @@ export function allCannedLines(): string[] {
     DEAL,
     ...QUESTIONS,
     HEARD_ENOUGH,
+    ...HMM,
     ...FOLLOWUP_FALLBACKS,
     ...VERDICT_FALLBACKS,
     ...CASE_CLOSED,

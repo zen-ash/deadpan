@@ -16,7 +16,12 @@ import { relatedHits, tokens } from './words';
 export const WEIGHTS = { rt: 0.3, pitch: 0.2, hesitation: 0.25, blink: 0.15, lip: 0.1 } as const;
 
 const PAUSE_MIN_MS = 300;
-const FILLERS = new Set(['um', 'umm', 'uh', 'uhh', 'uhm', 'erm', 'er', 'hmm', 'mm', 'like']);
+const FILLERS = new Set(['um', 'umm', 'uh', 'uhh', 'uhm', 'erm', 'er', 'hmm', 'mm']);
+/**
+ * "Like" only counts as a filler when Scribe sets it off with commas ("it's, like, a bird", or
+ * "Like, I don't know"), not in comparisons such as "it's like a bird".
+ */
+const FILLER_LIKE = /(?:,|^|[.!?])\s*like\s*,/gi;
 const Z_LIMIT = 3;
 
 /**
@@ -115,7 +120,10 @@ export function answerMetrics(
   const toks = tokens(text);
   let fillers: number | null = null;
   if (text.trim()) {
-    fillers = toks.filter((t) => FILLERS.has(t)).length + (text.toLowerCase().match(/\byou know\b/g)?.length ?? 0);
+    fillers =
+      toks.filter((t) => FILLERS.has(t)).length +
+      (text.match(FILLER_LIKE)?.length ?? 0) +
+      (text.toLowerCase().match(/\byou know\b/g)?.length ?? 0);
   }
 
   // Frame-level signals over the answer.
@@ -191,9 +199,11 @@ const z = (x: number | null, s: Stat) => (x === null ? null : clampZ((x - s.mean
 
 /** z-scores for one answer, plus the weighted delivery score over the features it has. */
 export function scoreAnswer(m: AnswerMetrics, b: Baseline): { z: AnswerZ; delivery: number | null } {
+  const fillers = z(fillerRate(m), b.fillerRate);
+  const pauses = z(pauseRatio(m), b.pauseRatio);
   const hesitationParts = [
-    z(fillerRate(m), b.fillerRate),
-    z(pauseRatio(m), b.pauseRatio),
+    fillers,
+    pauses,
     // Slower speech than usual counts towards hesitation.
     m.wordsPerSec === null ? null : -z(m.wordsPerSec, b.wordsPerSec)!,
   ].filter((v): v is number => v !== null);
@@ -203,6 +213,8 @@ export function scoreAnswer(m: AnswerMetrics, b: Baseline): { z: AnswerZ; delive
     rt: z(m.rtMs, b.rt),
     pitch: m.pitchShiftSt === null ? null : clampZ(m.pitchShiftSt / MIN_SCALE.pitchSt),
     hesitation: hesitationParts.length > 0 ? clampZ(mean(hesitationParts)) : null,
+    pauses,
+    fillers,
     // Blinking can rise or drop under pressure, so any change from baseline counts.
     blink: blink === null ? null : Math.abs(blink),
     lip: z(m.lipPress, b.lip),
@@ -210,7 +222,7 @@ export function scoreAnswer(m: AnswerMetrics, b: Baseline): { z: AnswerZ; delive
 
   let sum = 0;
   let weight = 0;
-  for (const key of Object.keys(WEIGHTS) as (keyof AnswerZ)[]) {
+  for (const key of Object.keys(WEIGHTS) as (keyof typeof WEIGHTS)[]) {
     const value = scores[key];
     if (value === null) continue;
     sum += WEIGHTS[key] * value;

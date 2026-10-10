@@ -156,7 +156,11 @@ export interface AnswerMetrics {
 export interface AnswerZ {
   rt: number | null;
   pitch: number | null;
+  /** Pauses, fillers and slower speech combined; this is what the delivery score weighs. */
   hesitation: number | null;
+  pauses: number | null;
+  fillers: number | null;
+  /** Size of the change in blink rate, in either direction. */
   blink: number | null;
   lip: number | null;
 }
