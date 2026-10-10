@@ -1,49 +1,32 @@
-import { useEffect, useRef } from 'react';
-import { anchors } from './anchors';
+import type { Slot } from './layout';
 import type { SuspectView } from './Room';
 import { SuspectCard } from './SuspectCard';
 
-/**
- * The suspect cards, as ordinary page elements over the room. Each frame they're moved to just
- * under their face, using the positions the 3D scene projects into `anchors`.
- */
-export function SuspectCards({ suspects, activeId }: { suspects: SuspectView[]; activeId: string | null }) {
-  const refs = useRef(new Map<string, HTMLDivElement>());
-
-  useEffect(() => {
-    let frame = requestAnimationFrame(function place() {
-      for (const [id, el] of refs.current) {
-        const a = anchors.get(id);
-        if (!a) continue;
-        el.style.transform = `translate(${a.x.toFixed(1)}px, ${a.y.toFixed(1)}px) translateX(-50%) scale(${a.scale.toFixed(3)})`;
-        el.style.opacity = '1';
-      }
-      frame = requestAnimationFrame(place);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
+/** The suspect cards, as ordinary page elements over the room, at the slots from layout.ts. */
+export function SuspectCards({ suspects, slots, activeId }: { suspects: SuspectView[]; slots: Slot[]; activeId: string | null }) {
   return (
     <div className="suspect-cards">
-      {suspects.map((s) => (
-        <div
-          key={s.player.id}
-          className="card-anchor"
-          ref={(el) => {
-            if (el) refs.current.set(s.player.id, el);
-            else refs.current.delete(s.player.id);
-          }}
-        >
-          <SuspectCard
-            player={s.player}
-            drift={s.drift}
-            lastAnswer={s.lastAnswer}
-            active={activeId === s.player.id}
-            benched={s.benched}
-            badge={s.badge}
-          />
-        </div>
-      ))}
+      {suspects.map((s, i) => {
+        const slot = slots[i];
+        if (!slot) return null;
+        return (
+          <div
+            key={s.player.id}
+            className="card-anchor"
+            style={{ transform: `translate(${slot.cardX.toFixed(1)}px, ${slot.cardY.toFixed(1)}px) scale(${slot.cardScale.toFixed(3)})` }}
+          >
+            <SuspectCard
+              player={s.player}
+              variant={slot.variant}
+              drift={s.drift}
+              lastAnswer={s.lastAnswer}
+              active={activeId === s.player.id}
+              benched={s.benched}
+              badge={s.badge}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

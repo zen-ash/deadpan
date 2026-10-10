@@ -1,15 +1,26 @@
 import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type SpokenLine, type Verdict } from '@deadpan/shared';
 import QRCode from 'qrcode';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { HostAudio } from '../host/audio';
 import { EvidenceBoard } from '../host/EvidenceBoard';
 import { Interrogation } from '../host/Interrogation';
+import { layoutSuspects, stageArea } from '../host/layout';
 import { live } from '../host/live';
 import { Room, type SuspectView } from '../host/Room';
 import { SuspectCards } from '../host/SuspectCards';
 import { RoomSocket } from '../lib/socket';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function useViewport() {
+  const [size, setSize] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
+  useEffect(() => {
+    const onResize = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return size;
+}
 
 export function Host({ code }: { code: string }) {
   const socketRef = useRef<RoomSocket | null>(null);
@@ -29,6 +40,10 @@ export function Host({ code }: { code: string }) {
   const [notice, setNotice] = useState('');
   /** The round shown on the evidence board, if it's open. */
   const [evidence, setEvidence] = useState<number | null>(null);
+  const viewport = useViewport();
+  const panelRef = useRef<HTMLElement>(null);
+  /** Right edge of the lobby's QR panel: the suspects use the space to its right. */
+  const [panelRight, setPanelRight] = useState(0);
   const joinUrl = `${location.origin}/play/${code}`;
 
   useEffect(() => {
@@ -125,6 +140,17 @@ export function Host({ code }: { code: string }) {
   const activeId = verdictShown ? verdict.accusedId : (turn?.playerId ?? null);
   const revealed = game?.phase === 'verdict' && game.verdictStage === 'revealed' && verdict;
 
+  // Keep track of where the lobby panel ends, so the suspects fit beside it.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const measure = () => setPanelRight(panel.getBoundingClientRect().right);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [inRound]);
+
   const suspects: SuspectView[] = players.map((p) => ({
     player: p,
     drift: lastScored(p.id)?.delivery ?? null,
@@ -142,23 +168,39 @@ export function Host({ code }: { code: string }) {
         ? 'accused'
         : undefined,
   }));
+  const slots = layoutSuspects(suspects.length, stageArea(viewport, inRound, panelRight), inRound, viewport.h);
 
   return (
     <main className="host-stage">
-      <Room suspects={suspects} focus={focus} activeId={activeId} calibrating={game?.phase === 'baseline'} />
-      <SuspectCards suspects={suspects} activeId={activeId} />
+      <Room suspects={suspects} slots={slots} focus={focus} activeId={activeId} calibrating={game?.phase === 'baseline'} />
+      <SuspectCards suspects={suspects} slots={slots} activeId={activeId} />
 
       <div className="overlay">
         <header className="top-bar">
-          <span className="wordmark small">DEADPAN</span>
-          <span className="muted small">
-            <span className={`dot ${connected ? 'ok' : 'bad'}`} /> Room {code}
-            {inRound && ` · join at ${location.host}/play/${code}`}
-          </span>
+          {inRound ? (
+            // During a round the QR panel shrinks to this corner badge, so the faces get the full width.
+            <aside className="join-badge">
+              {qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}
+              <span>
+                <span className="wordmark small">DEADPAN</span>
+                <b>{code}</b>
+                <span className="muted">
+                  <span className={`dot ${connected ? 'ok' : 'bad'}`} /> {location.host}/play/{code}
+                </span>
+              </span>
+            </aside>
+          ) : (
+            <>
+              <span className="wordmark small">DEADPAN</span>
+              <span className="muted small">
+                <span className={`dot ${connected ? 'ok' : 'bad'}`} /> Room {code}
+              </span>
+            </>
+          )}
           <span className="top-actions">
             {!soundOn && (inRound || soundBlocked) && (
               <button className="button primary" onClick={enableSound}>
-                Turn on the detective's voice
+                Turn on sound
               </button>
             )}
             {inRound && game.phase !== 'verdict' && (
@@ -166,11 +208,25 @@ export function Host({ code }: { code: string }) {
                 End round
               </button>
             )}
+            {/* After the reveal the corner holds what's next, keeping the faces clear. */}
+            {revealed && (
+              <>
+                <button className="button primary" onClick={() => setEvidence(game.round)}>
+                  Evidence board
+                </button>
+                <button className="button" onClick={() => send('start_round')}>
+                  Play again
+                </button>
+                <button className="button ghost" onClick={() => send('end_round')}>
+                  Lobby
+                </button>
+              </>
+            )}
           </span>
         </header>
 
         {!inRound && (
-          <section className="lobby-panel">
+          <section className="lobby-panel" ref={panelRef}>
             <h1 className="wordmark">DEADPAN</h1>
             <p className="tagline">One of you is lying. The detective is listening.</p>
             <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
@@ -198,9 +254,6 @@ export function Host({ code }: { code: string }) {
             transcript={transcript && transcript.turnId === game.turn?.id ? transcript.text : ''}
             serverNow={() => socketRef.current?.clock.now() ?? Date.now()}
             name={name}
-            onEvidence={() => setEvidence(game.round)}
-            onPlayAgain={() => send('start_round')}
-            onLobby={() => send('end_round')}
           />
         )}
         {notice && <p className="banner bad notice">{notice}</p>}

@@ -1,6 +1,7 @@
 // The big screen's noir interrogation room: a dark room with blinds on the wall, one swinging
-// lamp, and a neon face per suspect. The lamp idles in the lobby, follows whoever is being
-// questioned, sweeps across everyone during the drumroll, and lands on the accused.
+// lamp, and a neon face per suspect. Faces are placed from screen-space slots (layout.ts), so
+// they always fit the free area next to the overlay. The lamp idles in the lobby, follows whoever
+// is questioned, sweeps across everyone during the drumroll, and lands on the accused.
 import type { AnswerResult, PlayerInfo } from '@deadpan/shared';
 import { SpotLight } from '@react-three/drei';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
@@ -13,18 +14,15 @@ import {
   DoubleSide,
   MeshBasicMaterial,
   type Group,
-  type Mesh,
   type PerspectiveCamera,
   type SpotLight as ThreeSpotLight,
-  Vector3,
 } from 'three';
-import { anchors } from './anchors';
 import { FaceMesh } from './FaceMesh';
+import type { Slot } from './layout';
 
-const SPACING = 1.8;
-const FACE_Y = 1.25;
-/** Faces sit just above the middle of the screen: subtitles above, cards and evidence below. */
-const LOOK_Y = 1.05;
+const CAM_Y = 1.2;
+const CAM_Z = 7;
+const FOV = 34;
 
 export interface SuspectView {
   player: PlayerInfo;
@@ -36,6 +34,8 @@ export interface SuspectView {
 
 interface RoomProps {
   suspects: SuspectView[];
+  /** One slot per suspect, in the same order. */
+  slots: Slot[];
   /** Who the lamp points at; 'sweep' swings it across everyone; null lets it idle. */
   focus: string | 'sweep' | null;
   /** The player being questioned; everyone else dims. */
@@ -44,11 +44,29 @@ interface RoomProps {
   calibrating: boolean;
 }
 
+/** World placement for a screen slot: position at depth 0 and the face's height in world units. */
+interface Placement {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+function usePlacements(slots: Slot[]): Placement[] {
+  const { size } = useThree();
+  // World units per CSS pixel at depth 0, for a camera looking straight down -z.
+  const k = (2 * CAM_Z * Math.tan((FOV * Math.PI) / 360)) / Math.max(1, size.height);
+  return slots.map((s) => ({
+    x: (s.faceX - size.width / 2) * k,
+    y: CAM_Y - (s.faceY - size.height / 2) * k,
+    scale: s.faceH * k,
+  }));
+}
+
 export function Room(props: RoomProps) {
   return (
-    <Canvas className="room-canvas" shadows dpr={[1, 2]} gl={{ antialias: false }} camera={{ position: [0, 1.5, 7], fov: 34 }}>
+    <Canvas className="room-canvas" shadows dpr={[1, 2]} gl={{ antialias: false }} camera={{ position: [0, CAM_Y, CAM_Z], fov: FOV }}>
       <color attach="background" args={['#040507']} />
-      <fog attach="fog" args={['#040507', 8, 20]} />
+      <fog attach="fog" args={['#040507', 9, 20]} />
       <Scene {...props} />
       <EffectComposer multisampling={4}>
         <Bloom mipmapBlur intensity={1.3} luminanceThreshold={0.25} luminanceSmoothing={0.3} />
@@ -59,74 +77,54 @@ export function Room(props: RoomProps) {
   );
 }
 
-function Scene({ suspects, focus, activeId, calibrating }: RoomProps) {
-  const n = Math.max(1, suspects.length);
-  const xs = suspects.map((_, i) => (i - (suspects.length - 1) / 2) * SPACING);
+function Scene({ suspects, slots, focus, activeId, calibrating }: RoomProps) {
+  const camera = useThree((s) => s.camera) as PerspectiveCamera;
+  useEffect(() => {
+    camera.position.set(0, CAM_Y, CAM_Z);
+    camera.lookAt(0, CAM_Y, 0);
+  }, [camera]);
+
+  const placements = usePlacements(slots);
   const index = typeof focus === 'string' && focus !== 'sweep' ? suspects.findIndex((s) => s.player.id === focus) : -1;
-  const focusX = index >= 0 ? xs[index]! : null;
+  const xs = placements.map((p) => p.x);
   return (
     <>
-      <CameraRig players={n} />
       <ambientLight intensity={0.05} />
       <hemisphereLight args={['#2a3550', '#050608', 0.25]} />
       <Walls />
-      <Table width={n * SPACING + 1.6} />
       <Blinds />
-      <Lamp focusX={focusX} sweep={focus === 'sweep'} span={((suspects.length - 1) * SPACING) / 2} />
-      {suspects.map((s, i) => (
-        <Suspect
-          key={s.player.id}
-          view={s}
-          x={xs[i]!}
-          active={activeId === s.player.id}
-          dim={activeId !== null && activeId !== s.player.id}
-          calibrating={calibrating}
-        />
-      ))}
+      <Lamp
+        target={index >= 0 ? (placements[index] ?? null) : null}
+        sweep={focus === 'sweep' && xs.length > 0 ? { from: Math.min(...xs), to: Math.max(...xs), y: placements[0]!.y } : null}
+      />
+      {suspects.map((s, i) =>
+        placements[i] ? (
+          <Suspect
+            key={s.player.id}
+            view={s}
+            place={placements[i]!}
+            active={activeId === s.player.id}
+            dim={activeId !== null && activeId !== s.player.id}
+            calibrating={calibrating}
+          />
+        ) : null,
+      )}
     </>
   );
-}
-
-/** Pulls the camera back as more suspects join, so everyone fits. */
-function CameraRig({ players }: { players: number }) {
-  const { camera, size } = useThree();
-  useFrame((_, dt) => {
-    const cam = camera as PerspectiveCamera;
-    const halfWidth = (players * SPACING + 1.4) / 2;
-    const tanH = Math.tan(((cam.fov / 2) * Math.PI) / 180) * (size.width / size.height);
-    const z = Math.max(5.8, halfWidth / tanH + 1.2);
-    cam.position.z += (z - cam.position.z) * (1 - Math.exp(-dt * 2));
-    cam.position.y = 1.45;
-    cam.lookAt(0, LOOK_Y, 0);
-  });
-  return null;
 }
 
 function Walls() {
   return (
     <>
       <mesh position={[0, 3, -3.2]} receiveShadow>
-        <planeGeometry args={[40, 12]} />
+        <planeGeometry args={[60, 20]} />
         <meshStandardMaterial color="#171a21" roughness={1} />
       </mesh>
-      <mesh rotation-x={-Math.PI / 2} position={[0, -0.7, 0]} receiveShadow>
-        <planeGeometry args={[40, 40]} />
+      <mesh rotation-x={-Math.PI / 2} position={[0, -2.2, 0]} receiveShadow>
+        <planeGeometry args={[60, 60]} />
         <meshStandardMaterial color="#0a0b0e" roughness={0.95} />
       </mesh>
     </>
-  );
-}
-
-function Table({ width }: { width: number }) {
-  const ref = useRef<Mesh>(null);
-  useFrame((_, dt) => {
-    if (ref.current) ref.current.scale.x += (width - ref.current.scale.x) * (1 - Math.exp(-dt * 3));
-  });
-  return (
-    <mesh ref={ref} position={[0, 0.05, 0.9]} receiveShadow>
-      <boxGeometry args={[1, 0.08, 1.3]} />
-      <meshStandardMaterial color="#2a1d14" roughness={0.6} metalness={0.1} />
-    </mesh>
   );
 }
 
@@ -147,7 +145,7 @@ function Blinds() {
   useEffect(() => {
     const l = light.current;
     if (!l) return;
-    l.target.position.set(-2, 2.6, -3.2);
+    l.target.position.set(-2, 2.4, -3.2);
     l.target.updateMatrixWorld();
   }, []);
   useEffect(() => () => stripes.dispose(), [stripes]);
@@ -155,7 +153,7 @@ function Blinds() {
     <spotLight
       ref={light}
       position={[6, 4.5, 3]}
-      angle={0.5}
+      angle={0.55}
       penumbra={0.3}
       intensity={90}
       distance={25}
@@ -169,33 +167,39 @@ function Blinds() {
 }
 
 interface LampProps {
-  focusX: number | null;
-  sweep: boolean;
-  span: number;
+  target: Placement | null;
+  sweep: { from: number; to: number; y: number } | null;
 }
 
 /** A hanging lamp that swings gently and points its beam at whoever is in focus. */
-function Lamp({ focusX, sweep, span }: LampProps) {
+function Lamp({ target, sweep }: LampProps) {
   const anchor = useRef<Group>(null);
   const light = useRef<ThreeSpotLight>(null);
-  const x = useRef(0);
+  const aim = useRef({ x: 0, y: CAM_Y });
   useFrame(({ clock }, dt) => {
     const t = clock.elapsedTime;
-    const target = sweep ? span * Math.sin(t * 2.6) : (focusX ?? 0);
-    x.current += (target - x.current) * (1 - Math.exp(-dt * (sweep ? 12 : 2.5)));
-    const swing = (focusX === null && !sweep ? 0.14 : 0.04) * Math.sin(t * 1.25);
+    let x = target?.x ?? 0;
+    let y = target?.y ?? CAM_Y;
+    if (sweep) {
+      x = (sweep.from + sweep.to) / 2 + ((sweep.to - sweep.from) / 2 + 0.3) * Math.sin(t * 2.6);
+      y = sweep.y;
+    }
+    const k = 1 - Math.exp(-dt * (sweep ? 12 : 2.5));
+    aim.current.x += (x - aim.current.x) * k;
+    aim.current.y += (y - aim.current.y) * k;
+    const swing = (target || sweep ? 0.04 : 0.14) * Math.sin(t * 1.25);
     if (anchor.current) {
-      anchor.current.position.x = x.current;
+      anchor.current.position.x = aim.current.x;
       anchor.current.rotation.z = swing;
     }
     const l = light.current;
     if (l) {
-      l.target.position.set(x.current - Math.sin(swing) * 3, FACE_Y - 0.1, 0.1);
+      l.target.position.set(aim.current.x - Math.sin(swing) * 3, aim.current.y - 0.1, 0.1);
       l.target.updateMatrixWorld();
     }
   });
   return (
-    <group ref={anchor} position={[0, 3.7, 0.5]}>
+    <group ref={anchor} position={[0, 4.3, 0.5]}>
       <mesh position={[0, 1.2, 0]}>
         <cylinderGeometry args={[0.012, 0.012, 2.4]} />
         <meshStandardMaterial color="#0d0d0f" />
@@ -213,10 +217,10 @@ function Lamp({ focusX, sweep, span }: LampProps) {
         position={[0, -0.12, 0]}
         angle={0.3}
         penumbra={0.6}
-        distance={5}
-        attenuation={4}
+        distance={6}
+        attenuation={4.5}
         anglePower={6}
-        intensity={40}
+        intensity={45}
         decay={1.4}
         color="#ffd6a0"
         opacity={0.12}
@@ -228,39 +232,30 @@ function Lamp({ focusX, sweep, span }: LampProps) {
 
 interface SuspectProps {
   view: SuspectView;
-  x: number;
+  place: Placement;
   active: boolean;
   dim: boolean;
   calibrating: boolean;
 }
 
-function Suspect({ view, x, active, dim, calibrating }: SuspectProps) {
+function Suspect({ view, place, active, dim, calibrating }: SuspectProps) {
   const group = useRef<Group>(null);
   const born = useRef(performance.now());
-  const point = useMemo(() => new Vector3(), []);
-  const id = view.player.id;
-  useEffect(() => () => void anchors.delete(id), [id]);
-  useFrame(({ camera, size }, dt) => {
+  const size = useRef(place.scale);
+  useFrame((_, dt) => {
     const g = group.current;
     if (!g) return;
-    // Where the card goes: just under the chin, in screen pixels.
-    point.set(0, -0.6, 0);
-    g.localToWorld(point);
-    const distance = point.distanceTo(camera.position);
-    point.project(camera);
-    anchors.set(id, {
-      x: ((point.x + 1) / 2) * size.width,
-      y: ((1 - point.y) / 2) * size.height,
-      scale: Math.min(1.1, Math.max(0.5, 6.8 / distance)),
-    });
-    // Pop in on arrival, then glide to a new seat when someone joins or leaves.
+    // Glide to a new seat when the layout changes; pop in on arrival.
+    const k = 1 - Math.exp(-dt * 4);
+    g.position.x += (place.x - g.position.x) * k;
+    g.position.y += (place.y - g.position.y) * k;
+    size.current += (place.scale - size.current) * k;
     const t = Math.min(1, (performance.now() - born.current) / 450);
     const pop = 1 + 2.2 * (t - 1) ** 3 + 1.2 * (t - 1) ** 2;
-    g.scale.setScalar(Math.max(0.001, pop));
-    g.position.x += (x - g.position.x) * (1 - Math.exp(-dt * 4));
+    g.scale.setScalar(Math.max(0.001, pop * size.current));
   });
   return (
-    <group ref={group} position={[x, FACE_Y, 0]}>
+    <group ref={group} position={[place.x, place.y, 0]}>
       <FaceMesh id={view.player.id} drift={view.drift} dim={dim} />
       {calibrating && <CalibrationRing active={active} />}
     </group>
@@ -284,7 +279,7 @@ function CalibrationRing({ active }: { active: boolean }) {
     <group ref={group}>
       {[0, 1, 2].map((i) => (
         <mesh key={i} rotation-z={(i * Math.PI * 2) / 3} material={material}>
-          <ringGeometry args={[0.66, 0.69, 48, 1, 0, Math.PI / 2]} />
+          <ringGeometry args={[0.56, 0.59, 48, 1, 0, Math.PI / 2]} />
         </mesh>
       ))}
     </group>

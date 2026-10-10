@@ -20,13 +20,10 @@ interface Props {
   transcript: string;
   serverNow(): number;
   name(id: string): string;
-  onEvidence(): void;
-  onPlayAgain(): void;
-  onLobby(): void;
 }
 
 /** The big screen's overlay during a round: phase, subtitles, live transcript and the verdict. */
-export function Interrogation({ game, verdict, line, transcript, serverNow, name, onEvidence, onPlayAgain, onLobby }: Props) {
+export function Interrogation({ game, verdict, line, transcript, serverNow, name }: Props) {
   const turn = game.turn;
   const ticking = game.phase === 'deal' || turn?.stage === 'answering';
   const [now, setNow] = useState(serverNow);
@@ -72,7 +69,7 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
         <p className="subtitle quiet">The detective is deliberating…</p>
       )}
 
-      {accusing && (
+      {accusing && game.verdictStage === 'accusing' && (
         <p className="accused-line">
           <span className="muted">The detective accuses </span>
           <span className="accused-name">{name(verdict.accusedId)}</span>
@@ -87,21 +84,11 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
             The imposter was <b>{name(verdict.imposterId)}</b>. The word was <b className="word">{verdict.word}</b>.
           </p>
           <p className="muted small">
+            The detective accused <b>{name(verdict.accusedId)}</b> ·{' '}
             {verdict.source === 'gemini'
               ? `Gemini verdict${verdict.confidence !== null ? `, ${Math.round(verdict.confidence * 100)}% sure` : ''}`
-              : 'Local verdict (Gemini was unavailable)'}
+              : 'local verdict (Gemini was unavailable)'}
           </p>
-          <div className="button-row">
-            <button className="button primary" onClick={onEvidence}>
-              Evidence board
-            </button>
-            <button className="button" onClick={onPlayAgain}>
-              Play again
-            </button>
-            <button className="button" onClick={onLobby}>
-              Lobby
-            </button>
-          </div>
         </div>
       )}
 
