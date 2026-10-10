@@ -29,7 +29,7 @@ export class RoomSocket {
       this.handlers.onOpen?.();
     };
     ws.onmessage = (event) => {
-      if (typeof event.data !== 'string') return;
+      if (this.stopped || typeof event.data !== 'string') return;
       let msg: ServerToClient;
       try {
         msg = JSON.parse(event.data);
@@ -39,9 +39,10 @@ export class RoomSocket {
       this.handlers.onMessage(msg);
     };
     ws.onclose = () => {
-      if (this.ws !== ws) return;
+      // A closed RoomSocket stays silent. Otherwise its late close (React dev mode opens and
+      // closes one right away) would mark its replacement's screen as disconnected.
+      if (this.stopped || this.ws !== ws) return;
       this.handlers.onConnectedChange?.(false);
-      if (this.stopped) return;
       const delay = Math.min(5000, 400 * 2 ** this.retries++);
       this.retryTimer = window.setTimeout(() => this.connect(), delay);
     };

@@ -45,6 +45,8 @@ export function Play({ code }: { code: string }) {
   const [playerId, setPlayerId] = useState<string | null>(null);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [health, setHealth] = useState<Health>(healthRef.current);
+  // iOS can pause the AudioContext when capture starts; the mic track still looks fine.
+  const [audioAsleep, setAudioAsleep] = useState(false);
 
   useEffect(() => {
     const socket = new RoomSocket({
@@ -87,14 +89,18 @@ export function Play({ code }: { code: string }) {
 
   useEffect(() => () => mediaRef.current?.stop(), []);
 
-  // While live: watch the camera and mic tracks, report changes, and draw the mic meter.
+  // While live: watch the camera, mic and audio context, report changes, and draw the mic meter.
   useEffect(() => {
     const media = mediaRef.current;
     if (stage !== 'live' || !media) return;
+    const { audioCtx, analyser } = media;
     const tracks = [media.stream.getVideoTracks()[0], media.stream.getAudioTracks()[0]];
 
     const update = () => {
-      const next = { cam: trackOk(tracks[0]), mic: trackOk(tracks[1]) };
+      const audioRunning = audioCtx.state === 'running';
+      setAudioAsleep(!audioRunning);
+      // The mic only counts as working if the audio we analyse is actually flowing.
+      const next = { cam: trackOk(tracks[0]), mic: trackOk(tracks[1]) && audioRunning };
       const prev = healthRef.current;
       if (next.cam === prev.cam && next.mic === prev.mic) return;
       healthRef.current = next;
@@ -105,19 +111,33 @@ export function Play({ code }: { code: string }) {
     for (const track of tracks) {
       for (const type of ['mute', 'unmute', 'ended']) track?.addEventListener(type, update);
     }
+    audioCtx.addEventListener('statechange', update);
     const poll = setInterval(update, 1000);
 
-    const buffer = new Float32Array(media.analyser.fftSize);
+    const buffer = new Float32Array(analyser.fftSize);
+    let peakDb = -Infinity;
     let frame = requestAnimationFrame(function draw() {
-      const db = 20 * Math.log10(micLevel(media.analyser, buffer) + 1e-8);
+      const db = 20 * Math.log10(micLevel(analyser, buffer) + 1e-8);
+      peakDb = Math.max(peakDb, db);
       const fill = Math.min(1, Math.max(0, (db + 60) / 50)); // -60 dB empty, -10 dB full
       if (meterRef.current) meterRef.current.style.transform = `scaleX(${fill})`;
       frame = requestAnimationFrame(draw);
     });
 
+    // One line in the server log so mic problems can be read from the laptop.
+    const report = setTimeout(() => {
+      const micRate = tracks[1]?.getSettings().sampleRate;
+      socketRef.current?.send({
+        t: 'diag',
+        msg: `audio: context ${audioCtx.state} at ${audioCtx.sampleRate} Hz, mic ${micRate ?? '?'} Hz, peak ${peakDb.toFixed(1)} dBFS in first 4 s`,
+      });
+    }, 4000);
+
     return () => {
       clearInterval(poll);
+      clearTimeout(report);
       cancelAnimationFrame(frame);
+      audioCtx.removeEventListener('statechange', update);
       for (const track of tracks) {
         for (const type of ['mute', 'unmute', 'ended']) track?.removeEventListener(type, update);
       }
@@ -254,8 +274,9 @@ export function Play({ code }: { code: string }) {
               'Joining…'
             )}
           </p>
+          {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
           <p className="muted">Look at the big screen.</p>
-          {(!health.cam || !health.mic) && (
+          {(!health.cam || (!health.mic && !audioAsleep)) && (
             <button className="button" onClick={() => location.reload()}>
               Camera or mic stopped. Reload
             </button>
