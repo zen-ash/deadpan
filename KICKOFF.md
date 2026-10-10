@@ -18,7 +18,6 @@ This uses Claude Code inside the **Claude desktop app** (the Code tab). It runs 
 6. **Make accounts and keys while Claude builds M0.** M0 doesn't need any keys.
    - **Gemini:** an API key from aistudio.google.com. Turn billing on so free-tier limits can't stall your demo.
    - **ElevenLabs:** an API key. MLH emails a promo code; otherwise the Creator plan is $11 for the first month. Before M3, pick the detective's voice on the ElevenLabs website and save its voice ID.
-   - **Tiger Cloud:** create a service and copy its connection string.
    - **Render:** create an account and connect it to your GitHub.
 7. **Put your keys in `.env`.** Ask Claude to copy `.env.example` to `.env`, then open `.env` and paste your keys in yourself. Never commit it.
 8. **Turn on Web Inspector** on your iPhone (Settings → Apps → Safari → Advanced) so you can see phone errors from Safari on your Mac.
@@ -82,8 +81,8 @@ This uses Claude Code inside the **Claude desktop app** (the Code tab). It runs 
 
 **M5:**
 > Do M5 from SPEC.md:
-> - Tiger Data: the samples hypertable, a continuous aggregate for baselines, and the replay query.
-> - Buffer writes if the database is down.
+> - A "camera view" toggle on the host for the Mercedes computer vision judges: each phone's live landmarks, blink and lip-press detections, head motion, heart-rate signal quality and on-device fps.
+> - Make sure the evidence-board replay and demo mode read from the saved round files.
 >
 > If there's time, add Two Truths and a Lie mode.
 

@@ -17,13 +17,13 @@ Deadpan is a multiplayer bluff game for 2–6 players with an AI detective. Each
 
 - **Monorepo** (pnpm): `apps/web` (Vite + React + TypeScript), `server` (Node + TypeScript), `packages/shared` (message types and game constants).
 - **Web:** React, React Three Fiber + drei (big screen), `@mediapipe/tasks-vision` **pinned to 1.0.1** (1.1.0 only came out Oct 6, so stay on the known-good version unless 1.0.1 breaks) with self-hosted wasm and `face_landmarker.task`, `pitchy` 4.x (pitch), `@ricky0123/vad-web` (speech onset), `qrcode` (join QR).
-- **Server:** `ws`, `@google/genai` (Gemini), `@elevenlabs/elevenlabs-js` (TTS, single-use Scribe tokens, sound effects), `pg` (Tiger Data / Postgres).
+- **Server:** `ws`, `@google/genai` (Gemini), `@elevenlabs/elevenlabs-js` (TTS, single-use Scribe tokens, sound effects). No database.
 - **Models** (all IDs below were checked against the Gemini and ElevenLabs docs on Oct 10, 2026; the Gemini docs now lead with `client.interactions.create` in `@google/genai`, so follow whichever call the current docs show):
   - `gemini-3.8-flash` with thinking set to **low** (`minimal` errors on this model) for the verdict.
   - `gemini-3.5-flash-lite` for fast follow-up questions.
   - `eleven_v4_turbo` for the detective's voice, with inline audio tags. Use the HTTP `/stream` endpoint: v4 is reportedly not on the classic `stream-input` WebSocket.
   - `scribe_v2_realtime` with `include_timestamps`, filler words kept, `filter_background_audio` on.
-- **Hosting:** Render web service (HTTPS). Database on Tiger Cloud.
+- **Hosting:** Render web service (HTTPS).
 
 ## Routes
 
@@ -78,11 +78,7 @@ Deadpan is a multiplayer bluff game for 2–6 players with an AI detective. Each
   - **Verdict call** (3.8 Flash, thinking low, 6 s timeout, started at the drumroll). Input: everything above. Output JSON: `{ "accused_player_id": string, "confidence": 0-1, "content_evidence": string[], "delivery_evidence": string[], "spoken_verdict": string }`.
   - **Fallback:** if either call times out, use the highest combined score (delivery plus a simple content check: does the answer contain words related to the secret?). Pick from 20 canned detective lines.
 - **TTS:** server-side ElevenLabs `eleven_v4_turbo` via the HTTP stream, piped to host as audio. Pre-generate and cache the sound effects (drumroll, stinger, noir room tone, "case closed") and the canned lines at startup.
-- **Tiger Data:**
-  - Table `samples(time timestamptz, room text, round int, player text, rt_ms int, pitch_st real, blink_pm real, lip_press real, fillers int, hr real null)`, converted with `create_hypertable('samples','time')`.
-  - Continuous aggregate `player_baseline_1s`: per-player 1-second `time_bucket` averages.
-  - Replay query: `time_bucket('250 ms')` series for one round.
-  - Batch inserts every 500 ms. If the database is unreachable the game keeps running and buffers writes.
+- **Round recording (no database):** the server keeps every `features` packet and transcript word for the current round in memory, and when the round ends writes it to `rounds/<room>-<round>.json`. The evidence-board replay and demo mode both read from these files. Render's disk resets on every deploy, so commit one good recorded round to the repo for demo mode.
 
 ## Big screen (`/host/:room`)
 
@@ -136,7 +132,7 @@ The host receives the room state plus forwarded `features` and `mesh` for every 
 3. **M2, turn engine:** the state machine runs a round with response times and Scribe transcripts, and baselines are stored.
 4. **M3, the detective:** Gemini follow-ups and verdict, v4 voice and sound effects, fallbacks. **A full Imposter round runs end to end with 2 phones.**
 5. **M4, the show:** noir scene, spotlight reveal, evidence-board replay, phone UI polish.
-6. **M5, sponsors and mode 2:** Tiger Data writes and replay query; custom domain; Two Truths and a Lie if ahead.
+6. **M5, computer vision showcase and mode 2:** a "camera view" toggle on the host for the Mercedes computer vision judges, showing each phone's live landmarks, blink and lip-press detections, head motion, heart-rate signal quality and on-device fps; custom domain; Two Truths and a Lie if ahead.
 7. **M6, hardening:**
    - reconnect handling;
    - silent-mic detection and reload;
