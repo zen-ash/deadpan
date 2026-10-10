@@ -1,5 +1,5 @@
 import { MAX_NAME_LENGTH, type GameState, type PlayerInfo, type Verdict } from '@deadpan/shared';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { diagnoseMediaError, micLevel, startPhoneMedia, trackOk, type MediaFailure, type PhoneMedia } from '../lib/media';
 import { RoomSocket } from '../lib/socket';
 import { DebugOverlay } from '../phone/DebugOverlay';
@@ -59,6 +59,8 @@ export function Play({ code }: { code: string }) {
   /** During a round only the health dot shows; tapping it shows the details. */
   const [showHealth, setShowHealth] = useState(false);
   const [faceLost, setFaceLost] = useState(false);
+  /** Width over height of the camera image: portrait on phones, landscape on most laptops. */
+  const [videoAspect, setVideoAspect] = useState(3 / 4);
   const [game, setGame] = useState<GameState | null>(null);
   /** undefined until dealt; null means this player is the imposter. */
   const [secret, setSecret] = useState<string | null | undefined>(undefined);
@@ -299,8 +301,18 @@ export function Play({ code }: { code: string }) {
 
       {serverError && <p className="banner bad">{serverError}</p>}
 
-      <div className={`preview ${stage === 'live' ? '' : 'hidden'} ${inRound ? 'compact' : ''}`}>
-        <video ref={videoRef} playsInline muted autoPlay />
+      <div
+        className={`preview ${stage === 'live' ? '' : 'hidden'} ${inRound ? 'compact' : ''}`}
+        style={{ '--video-aspect': String(videoAspect) } as CSSProperties}
+      >
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
+          onLoadedMetadata={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+          onResize={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
+        />
         {signals && showDebug && <DebugOverlay signals={signals} scribe={scribeStatus} />}
         {stage === 'live' && (
           <button className="debug-toggle" onClick={() => setShowDebug((v) => !v)}>

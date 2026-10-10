@@ -257,9 +257,10 @@ input:focus {
 
 .preview {
   position: relative;
-  width: 100%;
-  aspect-ratio: 3 / 4;
-  max-height: 52dvh;
+  /* The camera's own shape, shrunk to fit the height limit rather than cropped. */
+  width: min(100%, calc(52dvh * var(--video-aspect, 0.75)));
+  aspect-ratio: var(--video-aspect, 3 / 4);
+  margin-inline: auto;
   border-radius: 22px;
   overflow: hidden;
   border: 1px solid rgba(77, 232, 255, 0.45);
@@ -389,8 +390,16 @@ input:focus {
 
 /* Round: phone */
 
+/* During a round the camera becomes a thumbnail: enough to check you're in frame. It's a fifth
+   wider than the camera's shape, trimming a little off the top and bottom rather than the face. */
 .preview.compact {
-  max-height: 22dvh;
+  width: min(100%, calc(32dvh * var(--video-aspect, 0.75) * 1.2));
+  aspect-ratio: calc(var(--video-aspect, 0.75) * 1.2);
+  border-radius: 16px;
+}
+
+.preview.compact video {
+  object-position: 50% 40%;
 }
 
 .game {
