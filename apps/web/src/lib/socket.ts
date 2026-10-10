@@ -1,4 +1,10 @@
 import { WS_PATH, type ClientToServer, type HostToServer, type ServerToClient } from '@deadpan/shared';
+import { ClockSync } from './clock';
+
+/** A burst of quick pings right after connecting gets the clock synced, then one every 2 s. */
+const BURST_PINGS = 5;
+const BURST_GAP_MS = 150;
+const PING_EVERY_MS = 2000;
 
 export interface SocketHandlers {
   /** Runs after every connect and reconnect, so (re)send join messages here. */
@@ -9,12 +15,14 @@ export interface SocketHandlers {
   onConnectedChange?: (connected: boolean) => void;
 }
 
-/** A WebSocket to the game server that reconnects with backoff until closed. */
+/** A WebSocket to the game server that reconnects with backoff and keeps the clock synced. */
 export class RoomSocket {
+  readonly clock = new ClockSync();
   private ws: WebSocket | null = null;
   private stopped = false;
   private retries = 0;
   private retryTimer: number | undefined;
+  private pingTimer: number | undefined;
 
   constructor(private readonly handlers: SocketHandlers) {
     this.connect();
@@ -28,6 +36,7 @@ export class RoomSocket {
 
     ws.onopen = () => {
       this.retries = 0;
+      this.startPinging();
       this.handlers.onConnectedChange?.(true);
       this.handlers.onOpen?.();
     };
@@ -44,16 +53,29 @@ export class RoomSocket {
       } catch {
         return;
       }
+      if (msg.t === 'pong') this.clock.onPong(msg.c, msg.s);
       this.handlers.onMessage(msg);
     };
     ws.onclose = () => {
       // A closed RoomSocket stays silent. Otherwise its late close (React dev mode opens and
       // closes one right away) would mark its replacement's screen as disconnected.
       if (this.stopped || this.ws !== ws) return;
+      clearTimeout(this.pingTimer);
       this.handlers.onConnectedChange?.(false);
       const delay = Math.min(5000, 400 * 2 ** this.retries++);
       this.retryTimer = window.setTimeout(() => this.connect(), delay);
     };
+  }
+
+  private startPinging() {
+    clearTimeout(this.pingTimer);
+    let sent = 0;
+    const ping = () => {
+      this.send({ t: 'ping', c: Date.now() });
+      sent++;
+      this.pingTimer = window.setTimeout(ping, sent < BURST_PINGS ? BURST_GAP_MS : PING_EVERY_MS);
+    };
+    ping();
   }
 
   get connected() {
@@ -73,6 +95,7 @@ export class RoomSocket {
   close() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    clearTimeout(this.pingTimer);
     const ws = this.ws;
     // Closing mid-handshake logs a browser warning, so wait for the handshake to finish.
     if (ws?.readyState === WebSocket.CONNECTING) ws.onopen = () => ws.close();

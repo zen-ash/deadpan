@@ -59,6 +59,7 @@ export class FaceTracker {
   readonly face: FaceFeatures = {
     present: false,
     blinkPm: 0,
+    blinkCount: 0,
     lipPress: 0,
     brow: 0,
     gazeOff: 0,
@@ -175,6 +176,7 @@ export class FaceTracker {
 
     this.face.present = true;
     this.face.blinkPm = this.blinks.perMinute(now);
+    this.face.blinkCount = this.blinks.total;
     this.face.lipPress = this.lipPress.update((s('mouthPressLeft') + s('mouthPressRight') + s('mouthRollLower')) / 3, dt);
     this.face.brow = this.brow.update(s('browInnerUp'), dt);
     this.face.gazeOff = this.gaze.update(Math.min(1, Math.hypot(horizontal, vertical)), dt);
@@ -242,6 +244,8 @@ function quantizeMesh(lm: NormalizedLandmark[], w: number, h: number): Int16Arra
 
 /** Counts blinks over the last minute, using the blendshape score and the eye aspect ratio. */
 class BlinkCounter {
+  /** Every blink since tracking started. */
+  total = 0;
   private closed = false;
   private closedAt = 0;
   private openEar = 0;
@@ -258,7 +262,10 @@ class BlinkCounter {
     } else if (this.closed && (score < 0.35 || ear > this.openEar * 0.85)) {
       this.closed = false;
       // Longer than half a second is eyes shut, not a blink.
-      if (now - this.closedAt <= 500) this.events.push(now);
+      if (now - this.closedAt <= 500) {
+        this.events.push(now);
+        this.total++;
+      }
     }
     while (this.events.length > 0 && now - this.events[0]! > BLINK_WINDOW_MS) this.events.shift();
   }

@@ -1,0 +1,48 @@
+// Placeholder detective voice for M2: the laptop's built-in speech synthesis. M3 replaces it with
+// ElevenLabs. Only ever used on the big screen; phones must never call speechSynthesis (on iOS it
+// mutes the camera and mic).
+
+const PREFERRED_VOICES = ['Daniel', 'Arthur', 'Fred', 'Alex', 'Google UK English Male'];
+
+function pickVoice(): SpeechSynthesisVoice | null {
+  const voices = speechSynthesis.getVoices().filter((v) => v.lang.startsWith('en'));
+  for (const name of PREFERRED_VOICES) {
+    const voice = voices.find((v) => v.name.startsWith(name));
+    if (voice) return voice;
+  }
+  return voices[0] ?? null;
+}
+
+/**
+ * Speaks a line and resolves when it has finished (or failed). Always resolves within a timeout
+ * based on the line's length, so a stuck or blocked synthesizer can't stall the round.
+ */
+export function speakLine(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    const words = text.split(/\s+/).length;
+    const timeout = setTimeout(finish, Math.max(2000, words * 450) + 2000);
+    let finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolve();
+    }
+
+    if (!('speechSynthesis' in window)) {
+      // No voice at all: wait roughly as long as reading the line aloud would take.
+      clearTimeout(timeout);
+      setTimeout(finish, Math.max(1500, words * 380));
+      return;
+    }
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = pickVoice();
+    if (voice) utterance.voice = voice;
+    utterance.rate = 0.95;
+    utterance.pitch = 0.8;
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    speechSynthesis.speak(utterance);
+  });
+}

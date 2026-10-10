@@ -1,10 +1,12 @@
-import { MAX_NAME_LENGTH, type PlayerInfo } from '@deadpan/shared';
-import { useEffect, useRef, useState } from 'react';
+import { MAX_NAME_LENGTH, type GameState, type PlayerInfo, type Verdict } from '@deadpan/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { diagnoseMediaError, micLevel, startPhoneMedia, trackOk, type MediaFailure, type PhoneMedia } from '../lib/media';
 import { RoomSocket } from '../lib/socket';
 import { DebugOverlay } from '../phone/DebugOverlay';
 import { loadFaceLandmarker } from '../phone/face';
+import { GamePanel } from '../phone/GamePanel';
 import { PhoneSignals } from '../phone/signals';
+import { TurnController } from '../phone/turns';
 
 type Stage = 'setup' | 'starting' | 'live' | 'error';
 interface Health {
@@ -38,6 +40,8 @@ export function Play({ code }: { code: string }) {
   // Set when the player first taps start; from then on every (re)connect sends a join.
   const joinNameRef = useRef<string | null>(null);
   const healthRef = useRef<Health>({ cam: false, mic: false });
+  const signalsRef = useRef<PhoneSignals | null>(null);
+  const turnsRef = useRef<TurnController | null>(null);
 
   const [name, setName] = useState(loadName);
   const [stage, setStage] = useState<Stage>('setup');
@@ -52,6 +56,11 @@ export function Play({ code }: { code: string }) {
   const [audioAsleep, setAudioAsleep] = useState(false);
   const [signals, setSignals] = useState<PhoneSignals | null>(null);
   const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') !== '0');
+  const [game, setGame] = useState<GameState | null>(null);
+  /** undefined until dealt; null means this player is the imposter. */
+  const [secret, setSecret] = useState<string | null | undefined>(undefined);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [scribeStatus, setScribeStatus] = useState('off');
 
   // Start downloading the face tracker (~15 MB) while the player types their name.
   useEffect(() => {
@@ -80,18 +89,38 @@ export function Play({ code }: { code: string }) {
             setPlayers(msg.players);
             break;
           case 'pong':
-            setRtt(Date.now() - msg.c);
+            setRtt(socket.clock.rtt);
             break;
           case 'error':
             setServerError(msg.message);
+            break;
+          case 'state':
+            setGame(msg);
+            if (msg.phase === 'lobby' || msg.phase === 'baseline') {
+              setSecret(undefined);
+              setVerdict(null);
+            }
+            break;
+          case 'secret':
+            setSecret(msg.word);
+            break;
+          case 'verdict':
+            setVerdict(msg);
+            break;
+          case 'scribe':
+            turnsRef.current?.onScribe(msg.turnId, msg.url);
+            break;
+          case 'your_turn':
+            turnsRef.current?.onYourTurn(msg.turnId);
+            break;
+          case 'turn_over':
+            void turnsRef.current?.onTurnOver(msg.turnId);
             break;
         }
       },
     });
     socketRef.current = socket;
-    const ping = setInterval(() => socket.send({ t: 'ping', c: Date.now() }), 2000);
     return () => {
-      clearInterval(ping);
       socket.close();
       socketRef.current = null;
     };
@@ -114,12 +143,26 @@ export function Play({ code }: { code: string }) {
       {
         send: (msg) => socketRef.current?.send(msg),
         sendBinary: (data) => socketRef.current?.sendBinary(data),
+        toServer: (local) => socketRef.current?.clock.toServer(local) ?? local,
       },
       { vad },
     );
+    const turns = new TurnController({
+      audioCtx: media.audioCtx,
+      stream: media.stream,
+      send: (msg) => socketRef.current?.send(msg),
+      toServer: (local) => socketRef.current?.clock.toServer(local) ?? local,
+      voice: () => signalsRef.current?.voice ?? null,
+      onScribeStatus: setScribeStatus,
+    });
+    signalsRef.current = next;
+    turnsRef.current = turns;
     setSignals(next);
     return () => {
       next.stop();
+      turns.dispose();
+      signalsRef.current = null;
+      turnsRef.current = null;
       setSignals(null);
     };
   }, [stage]);
@@ -223,8 +266,10 @@ export function Play({ code }: { code: string }) {
     );
   }
 
+  const serverNow = useCallback(() => socketRef.current?.clock.now() ?? Date.now(), []);
   const me = players.find((p) => p.id === playerId);
   const allOk = connected && health.cam && health.mic;
+  const inRound = !!game && game.phase !== 'lobby' && !!playerId && game.roundPlayers.includes(playerId);
 
   return (
     <main className="phone">
@@ -236,9 +281,9 @@ export function Play({ code }: { code: string }) {
 
       {serverError && <p className="banner bad">{serverError}</p>}
 
-      <div className={`preview ${stage === 'live' ? '' : 'hidden'}`}>
+      <div className={`preview ${stage === 'live' ? '' : 'hidden'} ${inRound ? 'compact' : ''}`}>
         <video ref={videoRef} playsInline muted autoPlay />
-        {signals && showDebug && <DebugOverlay signals={signals} />}
+        {signals && showDebug && <DebugOverlay signals={signals} scribe={scribeStatus} />}
         {stage === 'live' && (
           <button className="debug-toggle" onClick={() => setShowDebug((v) => !v)}>
             {showDebug ? 'hide debug' : 'debug'}
@@ -316,7 +361,15 @@ export function Play({ code }: { code: string }) {
             )}
           </p>
           {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
-          <p className="muted">Look at the big screen.</p>
+          <GamePanel
+            game={game}
+            playerId={playerId}
+            players={players}
+            secret={secret}
+            verdict={verdict}
+            serverNow={serverNow}
+            onDone={(turnId) => turnsRef.current?.done(turnId)}
+          />
           {(!health.cam || (!health.mic && !audioAsleep)) && (
             <button className="button" onClick={() => location.reload()}>
               Camera or mic stopped. Reload

@@ -34,7 +34,14 @@ export function normalizeRoomCode(raw: string): string | null {
   return code;
 }
 
-export type Phase = 'lobby' | 'baseline' | 'deal' | 'question' | 'answer' | 'followup' | 'verdict' | 'replay';
+export type Phase = 'lobby' | 'baseline' | 'deal' | 'question' | 'followup' | 'verdict' | 'replay';
+
+// Turn timing (SPEC: an answer ends on "done", after 2.5 s of silence, or at a 15 s cap).
+export const ANSWER_CAP_MS = 15_000;
+export const SILENCE_END_MS = 2_500;
+/** Speech this soon after the question ends is the question's echo, not an answer. */
+export const MIN_RESPONSE_MS = 200;
+export const DEAL_MS = 7_000;
 
 export interface PlayerInfo {
   id: string;
@@ -49,6 +56,8 @@ export interface FaceFeatures {
   /** False when no face is in view; the other values then hold their last readings. */
   present: boolean;
   blinkPm: number;
+  /** Blinks counted since tracking started, so the server can count blinks within an answer. */
+  blinkCount: number;
   lipPress: number;
   brow: number;
   gazeOff: number;
@@ -72,33 +81,138 @@ export interface FeaturesPacket {
   hr: { bpm: number | null; quality: number };
 }
 
+export type TurnKind = 'baseline' | 'question' | 'followup';
+/** asking: the detective's line is playing. answering: the player's answer is being timed. */
+export type TurnStage = 'asking' | 'answering' | 'scoring';
+
+export interface TurnInfo {
+  /** Also the line id the host reports back in tts_end. */
+  id: string;
+  kind: TurnKind;
+  playerId: string;
+  /** The detective's line, shown as subtitles. */
+  text: string;
+  stage: TurnStage;
+  /** 1-based position of this turn within its phase, and the phase's turn count. */
+  index: number;
+  total: number;
+  /** Server time the line finished playing, once the answer has started. */
+  questionEnd: number | null;
+  /** Server time the answer is cut off at the latest. */
+  answerDeadline: number | null;
+}
+
+export interface GameState {
+  phase: Phase;
+  round: number;
+  /** Players in this round. Anyone who joins mid-round waits for the next one. */
+  roundPlayers: string[];
+  turn: TurnInfo | null;
+  /** Server time the deal phase ends. */
+  dealEndsAt: number | null;
+}
+
+/** A word from Scribe, with start and end in server time (ms). */
+export interface TranscriptWord {
+  w: string;
+  start: number;
+  end: number;
+}
+
+export interface AnswerMetrics {
+  /** Question end to first speech onset. */
+  rtMs: number | null;
+  durationMs: number;
+  words: number;
+  transcript: string;
+  pauseCount: number | null;
+  pauseMs: number | null;
+  wordsPerSec: number | null;
+  fillers: number | null;
+  pitchHz: number | null;
+  /** Median pitch against the player's baseline, in semitones. */
+  pitchShiftSt: number | null;
+  blinkPm: number | null;
+  lipPress: number | null;
+}
+
+/** z-scores against the player's own baseline; positive means further from calm. */
+export interface AnswerZ {
+  rt: number | null;
+  pitch: number | null;
+  hesitation: number | null;
+  blink: number | null;
+  lip: number | null;
+}
+
+export interface AnswerResult {
+  turnId: string;
+  playerId: string;
+  kind: TurnKind;
+  question: string;
+  metrics: AnswerMetrics;
+  /** Null for baseline answers, which define calm. */
+  z: AnswerZ | null;
+  delivery: number | null;
+}
+
+export interface PlayerScore {
+  playerId: string;
+  /** Mean delivery score over the player's answers. */
+  delivery: number | null;
+  /** 0–1: how little their answers related to the secret word. */
+  content: number | null;
+  combined: number;
+}
+
+export interface Verdict {
+  round: number;
+  word: string;
+  imposterId: string;
+  accusedId: string;
+  correct: boolean;
+  source: 'local' | 'gemini';
+  scores: PlayerScore[];
+  evidence: string[];
+}
+
 export type ClientToServer =
   | { t: 'join'; room: string; name: string }
   | { t: 'status'; cam: boolean; mic: boolean }
   | { t: 'diag'; msg: string }
   | { t: 'ping'; c: number }
   | ({ t: 'features' } & FeaturesPacket)
+  // Speech onsets and ends, in server time.
   | { t: 'speech_onset'; ts: number }
   | { t: 'speech_end'; ts: number }
-  | { t: 'transcript'; final: boolean; words: { w: string; start: number; end: number }[] }
-  | { t: 'done' };
+  | { t: 'transcript'; turnId: string; final: boolean; text: string; words: TranscriptWord[] }
+  | { t: 'done'; turnId: string };
 
 export type HostToServer =
   | { t: 'host_join'; room: string }
-  | { t: 'tts_end'; lineId: string }
-  | { t: 'start_round' };
+  /** `at` is when playback ended, in server time. */
+  | { t: 'tts_end'; lineId: string; at: number }
+  | { t: 'start_round' }
+  /** Back to the lobby: after the verdict, or to abandon a round. */
+  | { t: 'end_round' };
 
-export type ErrorCode = 'bad_room' | 'bad_name' | 'room_full' | 'bad_message';
+export type ErrorCode = 'bad_room' | 'bad_name' | 'room_full' | 'bad_message' | 'not_ready';
 
 export type ServerToClient =
   | { t: 'welcome'; room: string; playerId: string | null }
-  | { t: 'room'; room: string; phase: Phase; players: PlayerInfo[] }
+  | { t: 'room'; room: string; players: PlayerInfo[] }
   | { t: 'error'; code: ErrorCode; message: string }
   | { t: 'pong'; c: number; s: number }
-  | { t: 'state'; phase: Phase; round: number; activePlayer?: string }
+  | ({ t: 'state' } & GameState)
   | { t: 'secret'; word: string | null } // null = imposter
-  | { t: 'your_turn'; questionEnd: number; scribeToken: string }
-  | { t: 'turn_over' }
-  // To hosts only: a player's latest features, and their speech onsets and ends.
+  // To the active phone. The Scribe socket opens while the question plays, but audio only
+  // streams once the answer starts.
+  | { t: 'scribe'; turnId: string; url: string }
+  | { t: 'your_turn'; turnId: string; questionEnd: number }
+  | { t: 'turn_over'; turnId: string }
+  | ({ t: 'verdict' } & Verdict)
+  // To hosts only.
   | ({ t: 'pf'; id: string } & FeaturesPacket)
-  | { t: 'speech'; id: string; on: boolean; ts: number };
+  | { t: 'speech'; id: string; on: boolean; ts: number }
+  | { t: 'live_transcript'; playerId: string; turnId: string; text: string; final: boolean }
+  | ({ t: 'answer' } & AnswerResult);

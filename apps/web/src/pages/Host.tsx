@@ -1,16 +1,26 @@
-import { MAX_PLAYERS, type PlayerInfo } from '@deadpan/shared';
+import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type Verdict } from '@deadpan/shared';
 import QRCode from 'qrcode';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Interrogation } from '../host/Interrogation';
 import { live } from '../host/live';
+import { speakLine } from '../host/speech';
 import { SuspectCard } from '../host/SuspectCard';
 import { RoomSocket } from '../lib/socket';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 export function Host({ code }: { code: string }) {
+  const socketRef = useRef<RoomSocket | null>(null);
+  const roundRef = useRef(0);
+  const spokenRef = useRef<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [qr, setQr] = useState('');
+  const [game, setGame] = useState<GameState | null>(null);
+  const [answers, setAnswers] = useState<AnswerResult[]>([]);
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [transcript, setTranscript] = useState<{ turnId: string; text: string } | null>(null);
+  const [notice, setNotice] = useState('');
   const joinUrl = `${location.origin}/play/${code}`;
 
   useEffect(() => {
@@ -22,32 +32,96 @@ export function Host({ code }: { code: string }) {
       onOpen: () => socket.send({ t: 'host_join', room: code }),
       onConnectedChange: setConnected,
       onMessage: (msg) => {
-        if (msg.t === 'room') {
-          live.setRoster(msg.players);
-          setPlayers(msg.players);
-        } else {
-          live.handle(msg);
+        switch (msg.t) {
+          case 'room':
+            live.setRoster(msg.players);
+            setPlayers(msg.players);
+            break;
+          case 'state':
+            if (msg.round !== roundRef.current) {
+              roundRef.current = msg.round;
+              setAnswers([]);
+              setVerdict(null);
+              setTranscript(null);
+            }
+            if (msg.phase === 'lobby') setVerdict(null);
+            setGame(msg);
+            setNotice('');
+            break;
+          case 'answer':
+            setAnswers((prev) => [...prev, msg]);
+            break;
+          case 'verdict':
+            setVerdict(msg);
+            break;
+          case 'live_transcript':
+            setTranscript({ turnId: msg.turnId, text: msg.text });
+            break;
+          case 'error':
+            setNotice(msg.message);
+            break;
+          default:
+            live.handle(msg);
         }
       },
       onBinary: (data) => live.handleMesh(data),
     });
-    return () => socket.close();
+    socketRef.current = socket;
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
   }, [code]);
+
+  // Read each new line aloud, then report the moment it finished: response time counts from there.
+  const turn = game?.turn;
+  useEffect(() => {
+    if (!turn || turn.stage !== 'asking' || spokenRef.current === turn.id) return;
+    spokenRef.current = turn.id;
+    void speakLine(turn.text).then(() => {
+      const socket = socketRef.current;
+      socket?.send({ t: 'tts_end', lineId: turn.id, at: socket.clock.toServer(Date.now()) });
+    });
+  }, [turn]);
+
+  const send = (t: 'start_round' | 'end_round') => socketRef.current?.send({ t });
+  const inRound = !!game && game.phase !== 'lobby';
+  const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
+  const lastAnswer = (id: string) => answers.findLast((a) => a.playerId === id);
 
   return (
     <main className={`host ${players.length > 0 ? 'has-players' : ''}`}>
       <section className="host-join">
         <h1 className="wordmark">DEADPAN</h1>
-        <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
-        <p className="muted">Scan to join, or open</p>
-        <p className="join-url">
-          {location.host}/play/<b>{code}</b>
-        </p>
-        {LOCAL_HOSTS.has(location.hostname) && (
-          <p className="banner warn">
-            Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.
-          </p>
+        {inRound && game ? (
+          <Interrogation
+            game={game}
+            verdict={verdict}
+            transcript={transcript && transcript.turnId === game.turn?.id ? transcript.text : ''}
+            serverNow={() => socketRef.current?.clock.now() ?? Date.now()}
+            name={name}
+            onPlayAgain={() => send('start_round')}
+            onEnd={() => send('end_round')}
+          />
+        ) : (
+          <>
+            <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
+            <p className="muted">Scan to join, or open</p>
+            <p className="join-url">
+              {location.host}/play/<b>{code}</b>
+            </p>
+            <button className="button primary huge" disabled={players.length === 0} onClick={() => send('start_round')}>
+              Start round
+            </button>
+            {players.length === 1 && <p className="muted small">Imposter needs 2+ players. One player works for testing.</p>}
+            {LOCAL_HOSTS.has(location.hostname) && (
+              <p className="banner warn">
+                Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.
+              </p>
+            )}
+          </>
         )}
+        {notice && <p className="banner bad">{notice}</p>}
       </section>
 
       <section className="host-players">
@@ -62,12 +136,28 @@ export function Host({ code }: { code: string }) {
         ) : (
           <div className={`suspect-grid count-${players.length}`}>
             {players.map((p) => (
-              <SuspectCard key={p.id} player={p} />
+              <SuspectCard
+                key={p.id}
+                player={p}
+                active={game?.turn?.playerId === p.id}
+                benched={inRound && !game?.roundPlayers.includes(p.id)}
+                lastAnswer={lastAnswer(p.id)}
+                badge={
+                  game?.phase === 'verdict' && verdict
+                    ? p.id === verdict.accusedId
+                      ? 'accused'
+                      : p.id === verdict.imposterId
+                        ? 'imposter'
+                        : undefined
+                    : undefined
+                }
+              />
             ))}
           </div>
         )}
         <footer className="muted small">
           <span className={`dot ${connected ? 'ok' : 'bad'}`} /> {connected ? `Room ${code} is live` : 'Reconnecting…'}
+          {inRound && <span> · join at {location.host}/play/{code}</span>}
         </footer>
       </section>
     </main>

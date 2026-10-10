@@ -1,4 +1,4 @@
-import type { PlayerInfo } from '@deadpan/shared';
+import type { AnswerResult, PlayerInfo } from '@deadpan/shared';
 import { Canvas } from '@react-three/fiber';
 import { FaceMesh } from './FaceMesh';
 import { useLivePlayer } from './live';
@@ -30,14 +30,25 @@ function Bar({ label, value, max, min = 0, format, myth }: BarProps) {
 
 const db = (rms: number) => (rms > 0 ? 20 * Math.log10(rms) : -100);
 
+interface CardProps {
+  player: PlayerInfo;
+  /** Being questioned right now. */
+  active?: boolean;
+  /** Joined mid-round; plays in the next one. */
+  benched?: boolean;
+  lastAnswer?: AnswerResult;
+  badge?: 'accused' | 'imposter';
+}
+
 /** One player on the big screen: their live neon face mesh and signal bars. */
-export function SuspectCard({ player }: { player: PlayerInfo }) {
+export function SuspectCard({ player, active, benched, lastAnswer, badge }: CardProps) {
   const p = useLivePlayer(player.id);
   const f = p.features;
   const speaking = p.speaking || !!f?.voice.vad;
 
   return (
-    <article className={`suspect-card ${speaking ? 'speaking' : ''}`}>
+    <article className={`suspect-card ${speaking ? 'speaking' : ''} ${active ? 'active' : ''} ${benched ? 'benched' : ''}`}>
+      {badge && <span className={`card-badge ${badge}`}>{badge === 'accused' ? 'Accused' : 'Imposter'}</span>}
       <div className="mesh-view">
         <Canvas camera={{ position: [0, 0, 1.6], fov: 42 }} dpr={[1, 2]} gl={{ alpha: true, antialias: true }}>
           <FaceMesh id={player.id} />
@@ -59,6 +70,31 @@ export function SuspectCard({ player }: { player: PlayerInfo }) {
         <Bar label="Voice" value={f ? db(f.voice.rms) : null} min={-60} max={-10} format={(v) => `${v.toFixed(0)} dB`} />
         <Bar label="Gaze" value={f?.face.gazeOff ?? null} max={1} format={(v) => v.toFixed(2)} myth />
       </div>
+      {lastAnswer && <LastAnswer answer={lastAnswer} />}
     </article>
+  );
+}
+
+/** The latest answer's measurements, against this player's own baseline. */
+function LastAnswer({ answer }: { answer: AnswerResult }) {
+  const m = answer.metrics;
+  const parts = [
+    m.rtMs === null ? 'no answer heard' : `RT ${(m.rtMs / 1000).toFixed(1)} s`,
+    m.pitchShiftSt !== null && `pitch ${m.pitchShiftSt >= 0 ? '+' : ''}${m.pitchShiftSt.toFixed(1)} st`,
+    m.fillers !== null && `${m.fillers} filler${m.fillers === 1 ? '' : 's'}`,
+    m.pauseCount !== null && `${m.pauseCount} pause${m.pauseCount === 1 ? '' : 's'}`,
+  ].filter(Boolean);
+  return (
+    <div className="last-answer">
+      <span className="last-answer-label">{answer.kind === 'baseline' ? 'Baseline' : 'Last answer'}</span>
+      <span>{parts.join(' · ')}</span>
+      {answer.delivery !== null && (
+        <span className={`delivery ${answer.delivery > 0.5 ? 'hot' : ''}`}>
+          drift {answer.delivery >= 0 ? '+' : ''}
+          {answer.delivery.toFixed(2)}
+        </span>
+      )}
+      {m.transcript && <span className="last-transcript">“{m.transcript}”</span>}
+    </div>
   );
 }

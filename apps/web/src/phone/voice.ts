@@ -166,6 +166,21 @@ export class VoiceAnalyser {
     }
   }
 
+  /**
+   * Forgets any speech in progress, so the next words count as a fresh onset. Called when the
+   * player's answer starts: the tail of the detective's line from the big screen's speakers
+   * must not be taken for the start of the answer.
+   */
+  resetSpeech() {
+    if (this.speaking) this.setSpeaking(false, Date.now());
+    this.rmsVad.reset();
+    this.sileroPendingStart = null;
+    if (this.silero) {
+      const vad = this.silero;
+      void vad.pause().then(() => (this.silero === vad ? vad.start() : undefined));
+    }
+  }
+
   /** Falls back to the RMS detector for good, e.g. when face tracking gets too slow. */
   async useRms(reason: string) {
     this.vadNote = reason;
@@ -196,6 +211,11 @@ class RmsVad {
   private speaking = false;
   private aboveSince: number | null = null;
   private lastAbove = 0;
+
+  reset() {
+    this.speaking = false;
+    this.aboveSince = null;
+  }
 
   update(now: number, rms: number, noiseFloor: number): { speaking: boolean; at: number } | null {
     const threshold = Math.max(noiseFloor * 3.16, 0.004);

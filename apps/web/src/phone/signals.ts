@@ -9,6 +9,8 @@ const MIN_FPS_WITH_SILERO = 12;
 export interface SignalSink {
   send(msg: ClientToServer): void;
   sendBinary(data: Int16Array<ArrayBuffer>): void;
+  /** Converts a Date.now() timestamp to server time (from the socket's clock sync). */
+  toServer(local: number): number;
 }
 
 export interface SignalOptions {
@@ -41,8 +43,8 @@ export class PhoneSignals {
     options: SignalOptions = {},
   ) {
     this.voice = new VoiceAnalyser(audioCtx, analyser, stream, {
-      onSpeechStart: (at) => sink.send({ t: 'speech_onset', ts: at }),
-      onSpeechEnd: (at) => sink.send({ t: 'speech_end', ts: at }),
+      onSpeechStart: (at) => sink.send({ t: 'speech_onset', ts: sink.toServer(at) }),
+      onSpeechEnd: (at) => sink.send({ t: 'speech_end', ts: sink.toServer(at) }),
     });
 
     landmarker.then(
@@ -77,7 +79,9 @@ export class PhoneSignals {
     const packet: FeaturesPacket = {
       ts: now,
       fps: face?.stats.fps ?? 0,
-      face: face ? { ...face.face } : { present: false, blinkPm: 0, lipPress: 0, brow: 0, gazeOff: 0, headMotion: 0, speaking: false },
+      face: face
+        ? { ...face.face }
+        : { present: false, blinkPm: 0, blinkCount: 0, lipPress: 0, brow: 0, gazeOff: 0, headMotion: 0, speaking: false },
       voice: { pitchHz: voice.pitchHz, clarity: voice.clarity, vad: this.voice.speaking, rms: voice.rms },
       // Camera heart rate isn't built yet; it's decorative and never used in the verdict.
       hr: { bpm: null, quality: 0 },

@@ -5,7 +5,7 @@ const db = (rms: number) => (rms > 0 ? `${(20 * Math.log10(rms)).toFixed(0)} dB`
 const n = (v: number, digits = 2) => v.toFixed(digits);
 
 /** Live readout of what the phone is measuring, drawn over the camera preview. */
-export function DebugOverlay({ signals }: { signals: PhoneSignals }) {
+export function DebugOverlay({ signals, scribe }: { signals: PhoneSignals; scribe: string }) {
   const [, setTick] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 250);
@@ -55,7 +55,7 @@ export function DebugOverlay({ signals }: { signals: PhoneSignals }) {
         {voice.vadNote && <span className="dim"> ({voice.vadNote})</span>}
       </div>
       <div>
-        <b>net</b> {n(signals.packetsPerSecond, 1)} packets/s
+        <b>net</b> {n(signals.packetsPerSecond, 1)} packets/s <b>scribe</b> {scribe}
       </div>
     </div>
   );

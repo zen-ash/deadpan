@@ -13,24 +13,9 @@ import {
   type ErrorCode,
   type FeaturesPacket,
   type HostToServer,
-  type Phase,
-  type PlayerInfo,
-  type ServerToClient,
 } from '@deadpan/shared';
-
-interface Player extends PlayerInfo {
-  ws: WebSocket;
-  /** Latest 10 Hz features from the phone. */
-  features: FeaturesPacket | null;
-}
-
-interface Room {
-  code: string;
-  phase: Phase;
-  players: Map<string, Player>;
-  hosts: Set<WebSocket>;
-  cleanup?: NodeJS.Timeout;
-}
+import { ImposterGame } from './game';
+import { broadcast, recordSample, recordSpeech, send, sendToHosts, type Player, type Room } from './room';
 
 type Conn =
   | { role: 'none' }
@@ -39,17 +24,19 @@ type Conn =
 
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 const HEARTBEAT_MS = 15_000;
-/** Live data to a host is skipped while this much is still queued (a slow big-screen link). */
-const HOST_BACKLOG_BYTES = 256 * 1024;
 const MESH_BYTES = (MESH_HEADER + MESH_POINTS.length * 3) * 2;
+/** Phone timestamps further than this from the server clock are replaced with "now". */
+const MAX_CLOCK_SKEW_MS = 10_000;
 
 const rooms = new Map<string, Room>();
 
 function getRoom(code: string): Room {
   let room = rooms.get(code);
   if (!room) {
-    room = { code, phase: 'lobby', players: new Map(), hosts: new Set() };
-    rooms.set(code, room);
+    const created = { code, players: new Map(), hosts: new Set() } as Omit<Room, 'game'> as Room;
+    created.game = new ImposterGame(created);
+    rooms.set(code, created);
+    room = created;
     console.log(`[room ${code}] created`);
   }
   clearTimeout(room.cleanup);
@@ -61,13 +48,10 @@ function scheduleCleanup(room: Room) {
   if (room.players.size > 0 || room.hosts.size > 0) return;
   clearTimeout(room.cleanup);
   room.cleanup = setTimeout(() => {
+    room.game.dispose();
     rooms.delete(room.code);
     console.log(`[room ${room.code}] removed (empty)`);
   }, EMPTY_ROOM_TTL_MS);
-}
-
-function send(ws: WebSocket, msg: ServerToClient) {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
 function sendError(ws: WebSocket, code: ErrorCode, message: string) {
@@ -75,21 +59,11 @@ function sendError(ws: WebSocket, code: ErrorCode, message: string) {
 }
 
 function broadcastRoom(room: Room) {
-  const msg: ServerToClient = {
+  broadcast(room, {
     t: 'room',
     room: room.code,
-    phase: room.phase,
     players: [...room.players.values()].map(({ id, name, slot, cam, mic }) => ({ id, name, slot, cam, mic })),
-  };
-  const data = JSON.stringify(msg);
-  for (const ws of room.hosts) if (ws.readyState === ws.OPEN) ws.send(data);
-  for (const p of room.players.values()) if (p.ws.readyState === p.ws.OPEN) p.ws.send(data);
-}
-
-function sendToHosts(room: Room, data: string | Buffer) {
-  for (const ws of room.hosts) {
-    if (ws.readyState === ws.OPEN && ws.bufferedAmount < HOST_BACKLOG_BYTES) ws.send(data);
-  }
+  });
 }
 
 function freeSlot(room: Room): number {
@@ -102,6 +76,13 @@ function freeSlot(room: Room): number {
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const numOrNull = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
+/** A phone or host timestamp in server time, or "now" if its clock sync looks wrong. */
+function serverTime(ts: unknown): number {
+  const now = Date.now();
+  const t = num(ts);
+  return Math.abs(t - now) < MAX_CLOCK_SKEW_MS ? t : now;
+}
+
 /** Copies only the known fields, as numbers and booleans, so bad input can't reach the hosts. */
 function sanitizeFeatures(m: FeaturesPacket): FeaturesPacket | null {
   const { face, voice, hr } = m;
@@ -112,6 +93,7 @@ function sanitizeFeatures(m: FeaturesPacket): FeaturesPacket | null {
     face: {
       present: Boolean(face.present),
       blinkPm: num(face.blinkPm),
+      blinkCount: num(face.blinkCount),
       lipPress: num(face.lipPress),
       brow: num(face.brow),
       gazeOff: num(face.gazeOff),
@@ -129,7 +111,7 @@ function forwardMesh(conn: Conn, data: RawData) {
   const frame = Buffer.isBuffer(data) ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
   if (frame.length !== MESH_BYTES || frame.readInt16LE(0) !== MESH_MAGIC) return;
   frame.writeInt16LE(conn.player.slot, 2);
-  sendToHosts(conn.room, frame);
+  sendToHosts(conn.room, frame, { live: true });
 }
 
 /** Trims and shortens the name, and adds " 2", " 3"… if someone in the room already has it. */
@@ -150,6 +132,7 @@ function leave(conn: Conn, ws: WebSocket) {
   } else if (conn.role === 'player') {
     conn.room.players.delete(conn.player.id);
     console.log(`[room ${conn.room.code}] ${conn.player.name} left`);
+    conn.room.game.onPlayerLeft(conn.player.id);
     broadcastRoom(conn.room);
     scheduleCleanup(conn.room);
   }
@@ -172,6 +155,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       room.hosts.add(ws);
       send(ws, { t: 'welcome', room: code, playerId: null });
       broadcastRoom(room);
+      room.game.syncTo(ws);
       return { role: 'host', room };
     }
 
@@ -200,11 +184,14 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
         mic: false,
         ws,
         features: null,
+        samples: [],
+        speech: [],
       };
       room.players.set(player.id, player);
       console.log(`[room ${code}] ${player.name} joined`);
       send(ws, { t: 'welcome', room: code, playerId: player.id });
       broadcastRoom(room);
+      room.game.syncTo(ws);
       return { role: 'player', room, player };
     }
 
@@ -226,21 +213,45 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       if (conn.role !== 'player') return conn;
       const features = sanitizeFeatures(msg);
       if (!features) return conn;
-      conn.player.features = features;
-      sendToHosts(conn.room, JSON.stringify({ t: 'pf', id: conn.player.id, ...features } satisfies ServerToClient));
+      recordSample(conn.player, features);
+      sendToHosts(conn.room, { t: 'pf', id: conn.player.id, ...features }, { live: true });
       return conn;
     }
 
     case 'speech_onset':
-    case 'speech_end':
-      if (conn.role === 'player') {
-        const speech: ServerToClient = { t: 'speech', id: conn.player.id, on: msg.t === 'speech_onset', ts: num(msg.ts) };
-        sendToHosts(conn.room, JSON.stringify(speech));
+    case 'speech_end': {
+      if (conn.role !== 'player') return conn;
+      const event = { at: serverTime(msg.ts), on: msg.t === 'speech_onset' };
+      recordSpeech(conn.player, event);
+      sendToHosts(conn.room, { t: 'speech', id: conn.player.id, on: event.on, ts: event.at });
+      conn.room.game.onSpeech(conn.player, event.on, event.at);
+      return conn;
+    }
+
+    case 'transcript':
+      if (conn.role === 'player') conn.room.game.onTranscript(conn.player, msg);
+      return conn;
+
+    case 'done':
+      if (conn.role === 'player') conn.room.game.onDone(conn.player, String(msg.turnId));
+      return conn;
+
+    case 'start_round':
+      if (conn.role === 'host') {
+        const error = conn.room.game.start();
+        if (error) sendError(ws, 'not_ready', error);
       }
       return conn;
 
+    case 'end_round':
+      if (conn.role === 'host') conn.room.game.end();
+      return conn;
+
+    case 'tts_end':
+      if (conn.role === 'host') conn.room.game.onTtsEnd(String(msg.lineId), serverTime(msg.at));
+      return conn;
+
     default:
-      // Turn and game messages arrive in later milestones.
       return conn;
   }
 }

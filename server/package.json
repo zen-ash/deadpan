@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "dev": "tsx watch --clear-screen=false --include ../.env src/index.ts",
     "start": "NODE_ENV=production tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },
