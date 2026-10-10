@@ -2,6 +2,9 @@ import { MAX_NAME_LENGTH, type PlayerInfo } from '@deadpan/shared';
 import { useEffect, useRef, useState } from 'react';
 import { diagnoseMediaError, micLevel, startPhoneMedia, trackOk, type MediaFailure, type PhoneMedia } from '../lib/media';
 import { RoomSocket } from '../lib/socket';
+import { DebugOverlay } from '../phone/DebugOverlay';
+import { loadFaceLandmarker } from '../phone/face';
+import { PhoneSignals } from '../phone/signals';
 
 type Stage = 'setup' | 'starting' | 'live' | 'error';
 interface Health {
@@ -47,6 +50,13 @@ export function Play({ code }: { code: string }) {
   const [health, setHealth] = useState<Health>(healthRef.current);
   // iOS can pause the AudioContext when capture starts; the mic track still looks fine.
   const [audioAsleep, setAudioAsleep] = useState(false);
+  const [signals, setSignals] = useState<PhoneSignals | null>(null);
+  const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') !== '0');
+
+  // Start downloading the face tracker (~15 MB) while the player types their name.
+  useEffect(() => {
+    loadFaceLandmarker().catch(() => {});
+  }, []);
 
   useEffect(() => {
     const socket = new RoomSocket({
@@ -88,6 +98,31 @@ export function Play({ code }: { code: string }) {
   }, [code]);
 
   useEffect(() => () => mediaRef.current?.stop(), []);
+
+  // Once the camera is live: analyse face and voice and stream them at 10 Hz.
+  useEffect(() => {
+    const media = mediaRef.current;
+    const video = videoRef.current;
+    if (stage !== 'live' || !media || !video) return;
+    const vad = new URLSearchParams(location.search).get('vad') === 'rms' ? 'rms' : 'silero';
+    const next = new PhoneSignals(
+      video,
+      media.audioCtx,
+      media.analyser,
+      media.stream,
+      loadFaceLandmarker(),
+      {
+        send: (msg) => socketRef.current?.send(msg),
+        sendBinary: (data) => socketRef.current?.sendBinary(data),
+      },
+      { vad },
+    );
+    setSignals(next);
+    return () => {
+      next.stop();
+      setSignals(null);
+    };
+  }, [stage]);
 
   // While live: watch the camera, mic and audio context, report changes, and draw the mic meter.
   useEffect(() => {
@@ -203,6 +238,12 @@ export function Play({ code }: { code: string }) {
 
       <div className={`preview ${stage === 'live' ? '' : 'hidden'}`}>
         <video ref={videoRef} playsInline muted autoPlay />
+        {signals && showDebug && <DebugOverlay signals={signals} />}
+        {stage === 'live' && (
+          <button className="debug-toggle" onClick={() => setShowDebug((v) => !v)}>
+            {showDebug ? 'hide debug' : 'debug'}
+          </button>
+        )}
       </div>
 
       {(stage === 'setup' || stage === 'starting') && (

@@ -1,9 +1,21 @@
 // Message types and game constants shared by the web app and the server.
 
+export { MESH_EDGES, MESH_POINTS } from './mesh';
+
 export const WS_PATH = '/ws';
 export const MAX_PLAYERS = 6;
 export const MAX_NAME_LENGTH = 16;
 export const FEATURE_HZ = 10;
+
+/**
+ * Face mesh frames travel as binary WebSocket messages: an Int16Array of
+ * [MESH_MAGIC, slot, x0, y0, z0, x1, y1, z1, …] for the landmarks in MESH_POINTS. Coordinates
+ * are centred on the face and scaled by its size, then multiplied by MESH_QUANT. Phones send
+ * slot 0 and the server fills in the player's slot before forwarding to the big screen.
+ */
+export const MESH_MAGIC = 0x4d31;
+export const MESH_HEADER = 2;
+export const MESH_QUANT = 16384;
 
 // No I or O, so codes read cleanly off a screen.
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -27,11 +39,15 @@ export type Phase = 'lobby' | 'baseline' | 'deal' | 'question' | 'answer' | 'fol
 export interface PlayerInfo {
   id: string;
   name: string;
+  /** 0–5, stable while the player is in the room. Identifies their binary mesh frames. */
+  slot: number;
   cam: boolean;
   mic: boolean;
 }
 
 export interface FaceFeatures {
+  /** False when no face is in view; the other values then hold their last readings. */
+  present: boolean;
   blinkPm: number;
   lipPress: number;
   brow: number;
@@ -47,13 +63,21 @@ export interface VoiceFeatures {
   rms: number;
 }
 
+export interface FeaturesPacket {
+  ts: number;
+  /** Face tracking frames per second on the phone. */
+  fps: number;
+  face: FaceFeatures;
+  voice: VoiceFeatures;
+  hr: { bpm: number | null; quality: number };
+}
+
 export type ClientToServer =
   | { t: 'join'; room: string; name: string }
   | { t: 'status'; cam: boolean; mic: boolean }
   | { t: 'diag'; msg: string }
   | { t: 'ping'; c: number }
-  | { t: 'features'; ts: number; face: FaceFeatures; voice: VoiceFeatures; hr: { bpm: number | null; quality: number } }
-  | { t: 'mesh'; ts: number; pts: Int16Array }
+  | ({ t: 'features' } & FeaturesPacket)
   | { t: 'speech_onset'; ts: number }
   | { t: 'speech_end'; ts: number }
   | { t: 'transcript'; final: boolean; words: { w: string; start: number; end: number }[] }
@@ -74,4 +98,7 @@ export type ServerToClient =
   | { t: 'state'; phase: Phase; round: number; activePlayer?: string }
   | { t: 'secret'; word: string | null } // null = imposter
   | { t: 'your_turn'; questionEnd: number; scribeToken: string }
-  | { t: 'turn_over' };
+  | { t: 'turn_over' }
+  // To hosts only: a player's latest features, and their speech onsets and ends.
+  | ({ t: 'pf'; id: string } & FeaturesPacket)
+  | { t: 'speech'; id: string; on: boolean; ts: number };

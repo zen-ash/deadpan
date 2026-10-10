@@ -1,9 +1,10 @@
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { dirname, resolve } from 'node:path';
+import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WS_PATH } from '@deadpan/shared';
+import { VENDOR_CONTENT_TYPES } from '../../apps/web/vendorAssets';
 import { createSocketServer } from './rooms';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -41,6 +42,21 @@ if (isProd) {
   // Hashed bundles never change, so browsers can keep them forever.
   // Missing ones 404 instead of falling through to index.html.
   app.use('/assets', express.static(resolve(dist, 'assets'), { immutable: true, maxAge: '1y', fallthrough: false }));
+
+  // Wasm runtimes and models live under versioned paths, so they're cached forever too. The
+  // build writes a .gz next to each one, which cuts the phone download by roughly two thirds.
+  const vendor = resolve(dist, 'vendor');
+  app.use('/vendor', (req, res, next) => {
+    if (!/\bgzip\b/.test(req.headers['accept-encoding'] ?? '')) return next();
+    const file = resolve(vendor, `.${decodeURIComponent(req.path)}`);
+    if (!file.startsWith(vendor + sep) || !existsSync(`${file}.gz`)) return next();
+    res.setHeader('Content-Type', VENDOR_CONTENT_TYPES[extname(file)] ?? 'application/octet-stream');
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(`${file}.gz`);
+  });
+  app.use('/vendor', express.static(vendor, { immutable: true, maxAge: '1y', fallthrough: false }));
   app.use(express.static(dist, { index: false }));
   // Every other GET is a client-side route: /, /host/:room, /play/:room, /replay/:room/:round.
   app.use((req, res, next) => {

@@ -4,6 +4,8 @@ export interface SocketHandlers {
   /** Runs after every connect and reconnect, so (re)send join messages here. */
   onOpen?: () => void;
   onMessage: (msg: ServerToClient) => void;
+  /** Binary frames (face meshes on the big screen). */
+  onBinary?: (data: ArrayBuffer) => void;
   onConnectedChange?: (connected: boolean) => void;
 }
 
@@ -22,6 +24,7 @@ export class RoomSocket {
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${protocol}://${location.host}${WS_PATH}`);
     this.ws = ws;
+    ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
       this.retries = 0;
@@ -29,7 +32,12 @@ export class RoomSocket {
       this.handlers.onOpen?.();
     };
     ws.onmessage = (event) => {
-      if (this.stopped || typeof event.data !== 'string') return;
+      if (this.stopped) return;
+      if (event.data instanceof ArrayBuffer) {
+        this.handlers.onBinary?.(event.data);
+        return;
+      }
+      if (typeof event.data !== 'string') return;
       let msg: ServerToClient;
       try {
         msg = JSON.parse(event.data);
@@ -54,6 +62,12 @@ export class RoomSocket {
 
   send(msg: ClientToServer | HostToServer) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+  }
+
+  /** Sends a binary frame, dropping it while the connection is backed up (the next one is 100 ms away). */
+  sendBinary(data: Int16Array<ArrayBuffer>) {
+    const ws = this.ws;
+    if (ws?.readyState === WebSocket.OPEN && ws.bufferedAmount < 64 * 1024) ws.send(data);
   }
 
   close() {

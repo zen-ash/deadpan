@@ -24,10 +24,12 @@ export async function startPhoneMedia(video: HTMLVideoElement): Promise<PhoneMed
   //    stream on iOS.
   let stream: MediaStream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: 640, height: 480, frameRate: 30 },
-      audio: true,
-    });
+    stream = new URLSearchParams(location.search).has('fake')
+      ? await (await import('./fakeMedia')).createFakeStream(audioCtx)
+      : await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: 640, height: 480, frameRate: 30 },
+          audio: true,
+        });
   } catch (err) {
     void audioCtx.close();
     throw err;

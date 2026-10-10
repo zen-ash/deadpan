@@ -5,9 +5,13 @@ import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import {
   MAX_NAME_LENGTH,
   MAX_PLAYERS,
+  MESH_HEADER,
+  MESH_MAGIC,
+  MESH_POINTS,
   normalizeRoomCode,
   type ClientToServer,
   type ErrorCode,
+  type FeaturesPacket,
   type HostToServer,
   type Phase,
   type PlayerInfo,
@@ -16,6 +20,8 @@ import {
 
 interface Player extends PlayerInfo {
   ws: WebSocket;
+  /** Latest 10 Hz features from the phone. */
+  features: FeaturesPacket | null;
 }
 
 interface Room {
@@ -33,6 +39,9 @@ type Conn =
 
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 const HEARTBEAT_MS = 15_000;
+/** Live data to a host is skipped while this much is still queued (a slow big-screen link). */
+const HOST_BACKLOG_BYTES = 256 * 1024;
+const MESH_BYTES = (MESH_HEADER + MESH_POINTS.length * 3) * 2;
 
 const rooms = new Map<string, Room>();
 
@@ -70,11 +79,57 @@ function broadcastRoom(room: Room) {
     t: 'room',
     room: room.code,
     phase: room.phase,
-    players: [...room.players.values()].map(({ id, name, cam, mic }) => ({ id, name, cam, mic })),
+    players: [...room.players.values()].map(({ id, name, slot, cam, mic }) => ({ id, name, slot, cam, mic })),
   };
   const data = JSON.stringify(msg);
   for (const ws of room.hosts) if (ws.readyState === ws.OPEN) ws.send(data);
   for (const p of room.players.values()) if (p.ws.readyState === p.ws.OPEN) p.ws.send(data);
+}
+
+function sendToHosts(room: Room, data: string | Buffer) {
+  for (const ws of room.hosts) {
+    if (ws.readyState === ws.OPEN && ws.bufferedAmount < HOST_BACKLOG_BYTES) ws.send(data);
+  }
+}
+
+function freeSlot(room: Room): number {
+  const used = new Set([...room.players.values()].map((p) => p.slot));
+  let slot = 0;
+  while (used.has(slot)) slot++;
+  return slot;
+}
+
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const numOrNull = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** Copies only the known fields, as numbers and booleans, so bad input can't reach the hosts. */
+function sanitizeFeatures(m: FeaturesPacket): FeaturesPacket | null {
+  const { face, voice, hr } = m;
+  if (!face || typeof face !== 'object' || !voice || typeof voice !== 'object') return null;
+  return {
+    ts: num(m.ts),
+    fps: num(m.fps),
+    face: {
+      present: Boolean(face.present),
+      blinkPm: num(face.blinkPm),
+      lipPress: num(face.lipPress),
+      brow: num(face.brow),
+      gazeOff: num(face.gazeOff),
+      headMotion: num(face.headMotion),
+      speaking: Boolean(face.speaking),
+    },
+    voice: { pitchHz: numOrNull(voice.pitchHz), clarity: num(voice.clarity), vad: Boolean(voice.vad), rms: num(voice.rms) },
+    hr: { bpm: numOrNull(hr?.bpm), quality: num(hr?.quality) },
+  };
+}
+
+/** Stamps the player's slot into a phone's mesh frame and passes it on to the hosts. */
+function forwardMesh(conn: Conn, data: RawData) {
+  if (conn.role !== 'player') return;
+  const frame = Buffer.isBuffer(data) ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+  if (frame.length !== MESH_BYTES || frame.readInt16LE(0) !== MESH_MAGIC) return;
+  frame.writeInt16LE(conn.player.slot, 2);
+  sendToHosts(conn.room, frame);
 }
 
 /** Trims and shortens the name, and adds " 2", " 3"… if someone in the room already has it. */
@@ -137,7 +192,15 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
         sendError(ws, 'room_full', `This room already has ${MAX_PLAYERS} players.`);
         return { role: 'none' };
       }
-      const player: Player = { id: randomUUID(), name: uniqueName(room, msg.name), cam: false, mic: false, ws };
+      const player: Player = {
+        id: randomUUID(),
+        name: uniqueName(room, msg.name),
+        slot: freeSlot(room),
+        cam: false,
+        mic: false,
+        ws,
+        features: null,
+      };
       room.players.set(player.id, player);
       console.log(`[room ${code}] ${player.name} joined`);
       send(ws, { t: 'welcome', room: code, playerId: player.id });
@@ -159,8 +222,25 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       return conn;
     }
 
+    case 'features': {
+      if (conn.role !== 'player') return conn;
+      const features = sanitizeFeatures(msg);
+      if (!features) return conn;
+      conn.player.features = features;
+      sendToHosts(conn.room, JSON.stringify({ t: 'pf', id: conn.player.id, ...features } satisfies ServerToClient));
+      return conn;
+    }
+
+    case 'speech_onset':
+    case 'speech_end':
+      if (conn.role === 'player') {
+        const speech: ServerToClient = { t: 'speech', id: conn.player.id, on: msg.t === 'speech_onset', ts: num(msg.ts) };
+        sendToHosts(conn.room, JSON.stringify(speech));
+      }
+      return conn;
+
     default:
-      // Game messages (features, mesh, turns) arrive in later milestones.
+      // Turn and game messages arrive in later milestones.
       return conn;
   }
 }
@@ -175,7 +255,7 @@ export function createSocketServer() {
     ws.on('pong', () => alive.set(ws, true));
 
     ws.on('message', (data: RawData, isBinary: boolean) => {
-      if (isBinary) return; // Binary mesh frames are handled from M1.
+      if (isBinary) return forwardMesh(conn, data);
       let msg: ClientToServer | HostToServer;
       try {
         msg = JSON.parse(data.toString());

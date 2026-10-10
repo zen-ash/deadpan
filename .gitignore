@@ -21,3 +21,6 @@ rounds.jsonl
 .DS_Store
 .idea/
 .vscode/
+
+# Test-only media for ?fake=1
+apps/web/public/test/

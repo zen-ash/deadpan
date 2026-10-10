@@ -1,6 +1,8 @@
 import { MAX_PLAYERS, type PlayerInfo } from '@deadpan/shared';
 import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
+import { live } from '../host/live';
+import { SuspectCard } from '../host/SuspectCard';
 import { RoomSocket } from '../lib/socket';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -20,14 +22,20 @@ export function Host({ code }: { code: string }) {
       onOpen: () => socket.send({ t: 'host_join', room: code }),
       onConnectedChange: setConnected,
       onMessage: (msg) => {
-        if (msg.t === 'room') setPlayers(msg.players);
+        if (msg.t === 'room') {
+          live.setRoster(msg.players);
+          setPlayers(msg.players);
+        } else {
+          live.handle(msg);
+        }
       },
+      onBinary: (data) => live.handleMesh(data),
     });
     return () => socket.close();
   }, [code]);
 
   return (
-    <main className="host">
+    <main className={`host ${players.length > 0 ? 'has-players' : ''}`}>
       <section className="host-join">
         <h1 className="wordmark">DEADPAN</h1>
         <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
@@ -52,16 +60,11 @@ export function Host({ code }: { code: string }) {
         {players.length === 0 ? (
           <p className="muted waiting">Waiting for players…</p>
         ) : (
-          <ul className="suspects">
+          <div className={`suspect-grid count-${players.length}`}>
             {players.map((p) => (
-              <li key={p.id} className="suspect">
-                <span className="avatar">{p.name.slice(0, 1).toUpperCase()}</span>
-                <span className="suspect-name">{p.name}</span>
-                <span className={`chip ${p.cam ? 'ok' : 'bad'}`}>cam</span>
-                <span className={`chip ${p.mic ? 'ok' : 'bad'}`}>mic</span>
-              </li>
+              <SuspectCard key={p.id} player={p} />
             ))}
-          </ul>
+          </div>
         )}
         <footer className="muted small">
           <span className={`dot ${connected ? 'ok' : 'bad'}`} /> {connected ? `Room ${code} is live` : 'Reconnecting…'}

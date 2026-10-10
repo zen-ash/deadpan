@@ -1,7 +1,10 @@
 import { normalizeRoomCode } from '@deadpan/shared';
-import { Host } from './pages/Host';
+import { lazy, Suspense } from 'react';
 import { Landing } from './pages/Landing';
 import { Play } from './pages/Play';
+
+// The big screen pulls in three.js; phones never download it.
+const Host = lazy(() => import('./pages/Host').then((m) => ({ default: m.Host })));
 
 function Message({ title, body }: { title: string; body: string }) {
   return (
@@ -27,7 +30,13 @@ export function App() {
   const code = normalizeRoomCode(decodeURIComponent(rawCode!));
   if (!code) return <Message title="Bad room code" body="Room codes are 4 letters, like KTXB." />;
 
-  if (kind === 'host' && !round) return <Host code={code} />;
+  if (kind === 'host' && !round) {
+    return (
+      <Suspense fallback={<main className="center-page muted">Loading the big screen…</main>}>
+        <Host code={code} />
+      </Suspense>
+    );
+  }
   if (kind === 'play' && !round) return <Play code={code} />;
   if (kind === 'replay' && round) {
     return <Message title={`Room ${code}, round ${round}`} body="The evidence board arrives in a later milestone." />;

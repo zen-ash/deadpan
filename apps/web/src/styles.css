@@ -196,23 +196,6 @@ input:focus {
   background: rgba(255, 181, 71, 0.1);
 }
 
-.chip {
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  border: 1px solid currentColor;
-}
-
-.chip.ok {
-  color: var(--ok);
-}
-
-.chip.bad {
-  color: var(--hot);
-}
-
 /* Landing and simple pages */
 
 .center-page {
@@ -290,6 +273,51 @@ input:focus {
   object-fit: cover;
   /* Mirror the front camera, like a selfie. */
   transform: scaleX(-1);
+}
+
+.debug {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.62);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: #d9f7ff;
+  font: 11px/1.45 var(--mono);
+  pointer-events: none;
+}
+
+.debug b {
+  color: var(--neon);
+  font-weight: 600;
+}
+
+.debug .dim {
+  color: var(--muted);
+}
+
+.debug .warn {
+  color: var(--warn);
+}
+
+.debug .hot {
+  color: var(--hot);
+  font-weight: 700;
+}
+
+.debug-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font: 12px var(--mono);
 }
 
 .setup {
@@ -441,47 +469,135 @@ input:focus {
   font-size: 1.2rem;
 }
 
-.suspects {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.host-players footer {
+  margin-top: auto;
 }
 
-.suspect {
+.host.has-players {
+  grid-template-columns: minmax(260px, 0.7fr) minmax(320px, 2.3fr);
+}
+
+.host.has-players .qr {
+  width: min(240px, 24vw);
+}
+
+.suspect-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-content: start;
+}
+
+.suspect-card {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.85rem 1rem;
+  flex-direction: column;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: #0c0e15;
+  border-radius: 18px;
+  background: #0b0d14;
+  overflow: hidden;
+  transition: border-color 200ms, box-shadow 200ms;
   animation: pop-in 320ms cubic-bezier(0.2, 1.4, 0.4, 1);
 }
 
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  border: 1px solid var(--neon);
-  color: var(--neon);
-  font-family: var(--mono);
-  font-weight: 700;
-  box-shadow: 0 0 16px rgba(77, 232, 255, 0.3);
+.suspect-card.speaking {
+  border-color: rgba(77, 232, 255, 0.6);
+  box-shadow: 0 0 30px rgba(77, 232, 255, 0.18);
+}
+
+.mesh-view {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: radial-gradient(circle at 50% 40%, #121a2a 0%, #05060a 70%);
+}
+
+.mesh-note {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  color: var(--warn);
+  font: 11px var(--mono);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.suspect-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.25rem;
 }
 
 .suspect-name {
   flex: 1;
-  font-size: 1.25rem;
+  font-size: 1.15rem;
   font-weight: 600;
 }
 
-.host-players footer {
-  margin-top: auto;
+.talking {
+  color: var(--neon);
+  font: 11px var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.bars {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.5rem 1rem 1rem;
+}
+
+.bar {
+  display: grid;
+  grid-template-columns: 6.8rem 1fr 4.4rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.bar-label {
+  color: var(--muted);
+}
+
+.bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #161a26;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--neon), #8af5ff);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 120ms linear;
+}
+
+.bar-value {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+/* Gaze aversion has no real link to lying, so it's shown greyed out and labelled MYTH. */
+.bar.myth .bar-label,
+.bar.myth .bar-value {
+  color: #6b7086;
+}
+
+.bar.myth .bar-fill {
+  background: repeating-linear-gradient(45deg, #59607a 0 4px, #3a3f52 4px 8px);
+}
+
+.myth-tag {
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font: 9px var(--mono);
+  letter-spacing: 0.1em;
 }
 
 @keyframes pop-in {
@@ -492,7 +608,8 @@ input:focus {
 }
 
 @media (max-width: 760px) {
-  .host {
+  .host,
+  .host.has-players {
     grid-template-columns: 1fr;
     padding: 1.25rem 16px;
   }
@@ -503,7 +620,7 @@ input:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .suspect {
+  .suspect-card {
     animation: none;
   }
 }
