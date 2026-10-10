@@ -58,6 +58,8 @@ export function SuspectCards({ suspects, slots, openSeats, activeId, moment }: P
             <div
               key={s.player.id}
               className={`card-anchor ${s.benched ? 'benched' : dimmed ? 'dimmed' : ''}`}
+              // Where this suspect's 3D face sits, so layout checks can see it.
+              data-face={`${slot.faceX.toFixed(0)},${slot.faceY.toFixed(0)},${slot.faceH.toFixed(0)}`}
               style={{ transform: `translate(${slot.cardX.toFixed(1)}px, ${slot.cardY.toFixed(1)}px) scale(${slot.cardScale.toFixed(3)})` }}
             >
               <SuspectCard

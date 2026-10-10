@@ -60,7 +60,7 @@ function Row({ label, fill, value, hot, myth }: RowProps) {
 }
 
 function Status({ player, live, moment, active, benched, drift }: Pick<CardProps, 'player' | 'moment' | 'active' | 'benched' | 'drift'> & { live: LivePlayer }) {
-  if (moment === 'revealed') {
+  if (moment === 'revealed' && !benched) {
     return (
       <span className="suspect-status drift" title="How far their answers drifted from their own calm baseline">
         <span className="drift-label">Drift</span>

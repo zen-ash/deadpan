@@ -38,18 +38,20 @@ const FACE_ASPECT = 0.8;
 /** Width a face takes beside its card, leaving room for the gold ring. */
 const FACE_BOX = 0.95;
 const GAP = 16;
+const ROW_GAP = 28;
 const BESIDE_GAP = 22;
 const MAX_SCALE = 1.15;
 /** The most of a row's height a card under its face may take: readable text comes first. */
 const CARD_SHARE = 0.68;
 
 /**
- * Up to 4 suspects share one row with cards under their faces. 5–6 go in two rows (3 + 3 or
- * 3 + 2); during a round their cards are compact and sit beside the faces, so both rows fit.
+ * During a round, up to 4 suspects share one row with cards under their faces, and 5–6 go in two
+ * rows (3 + 3 or 3 + 2) with compact cards beside the faces so both rows fit. The lobby is
+ * narrower (the join panel takes the left) but its cards are short, so it goes to two rows from 4.
  */
 export function layoutSuspects(n: number, area: Area, inRound: boolean, viewportH: number): Slot[] {
   if (n <= 0 || area.w <= 0 || area.h <= 0) return [];
-  const twoRows = n >= 5;
+  const twoRows = n >= (inRound ? 5 : 4);
   const rows = twoRows ? [Math.ceil(n / 2), Math.floor(n / 2)] : [n];
   const perRow = rows[0]!;
   const variant: CardVariant = !inRound ? 'lobby' : twoRows ? 'compact' : 'full';
@@ -65,7 +67,9 @@ export function layoutSuspects(n: number, area: Area, inRound: boolean, viewport
     faceH = Math.min(rowH * 0.86, (slotW * 0.96 - card.w * scale - BESIDE_GAP) / FACE_BOX, viewportH * 0.3);
   } else {
     scale = Math.min(MAX_SCALE, (slotW * 0.9) / card.w, (rowH * CARD_SHARE) / card.h);
-    faceH = Math.min(rowH - card.h * scale - GAP, (slotW * 0.8) / FACE_ASPECT, viewportH * (inRound ? 0.28 : 0.3));
+    // Two rows keep a gap, so the lower faces don't touch the cards above them.
+    const rowGap = rows.length > 1 ? ROW_GAP : 0;
+    faceH = Math.min(rowH - card.h * scale - GAP - rowGap, (slotW * 0.8) / FACE_ASPECT, viewportH * (inRound ? 0.28 : 0.3));
   }
   faceH = Math.max(48, faceH);
   const blockH = beside ? Math.max(faceH, card.h * scale) : faceH + GAP + card.h * scale;

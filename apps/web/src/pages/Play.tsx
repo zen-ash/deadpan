@@ -39,6 +39,8 @@ function saveName(name: string) {
 export function Play({ code }: { code: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const socketRef = useRef<RoomSocket | null>(null);
+  /** Every name seen in this room, so players who leave keep theirs on the verdict. */
+  const knownNames = useRef(new Map<string, string>());
   const mediaRef = useRef<PhoneMedia | null>(null);
   // Set when the player first taps start; from then on every (re)connect sends a join.
   const joinNameRef = useRef<string | null>(null);
@@ -95,6 +97,7 @@ export function Play({ code }: { code: string }) {
             setServerError('');
             break;
           case 'room':
+            for (const p of msg.players) knownNames.current.set(p.id, p.name);
             setPlayers(msg.players);
             break;
           case 'pong':
@@ -376,9 +379,9 @@ export function Play({ code }: { code: string }) {
             onLoadedMetadata={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
             onResize={(e) => e.currentTarget.videoHeight && setVideoAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
           />
-          <span className="cam-chip">
+          <span className="cam-chip" title={faceText}>
             <span className={`dot ${faceState === 'found' ? '' : 'warn'}`} />
-            {faceText}
+            <span className="cam-chip-text">{faceText}</span>
           </span>
           <span className={`cam-mic-chip ${health.mic ? '' : 'bad'}`} aria-label={health.mic ? 'Mic on' : 'Mic off'}>
             <MicIcon />
@@ -386,7 +389,7 @@ export function Play({ code }: { code: string }) {
           {live && checks('over-video')}
         </div>
         <span className="cam-text">
-          <span className="cam-text-main">On camera</span>
+          <span className="cam-text-main">{health.cam ? 'On camera' : 'Camera off'}</span>
           <span className={`cam-text-sub ${faceState === 'found' ? '' : 'warn'}`}>
             <span className={`dot ${faceState === 'found' ? '' : 'warn'}`} />
             {faceText}
@@ -473,7 +476,8 @@ export function Play({ code }: { code: string }) {
               </p>
             </>
           ) : (
-            <h1 className="phone-title waiting-title">Joining…</h1>
+            // Not in the room: still joining, or the server said no (a full room, say).
+            <h1 className="phone-title waiting-title">{serverError ? 'Couldn’t join.' : 'Joining…'}</h1>
           )}
         </section>
       )}
@@ -485,7 +489,7 @@ export function Play({ code }: { code: string }) {
             code={code}
             game={game}
             playerId={playerId}
-            players={players}
+            name={(id) => players.find((p) => p.id === id)?.name ?? knownNames.current.get(id) ?? 'Someone'}
             secret={secret}
             verdict={verdict}
             serverNow={serverNow}

@@ -1,4 +1,4 @@
-import { ANSWER_CAP_MS, type GameState, type PlayerInfo, type TurnInfo, type Verdict } from '@deadpan/shared';
+import { ANSWER_CAP_MS, type GameState, type TurnInfo, type Verdict } from '@deadpan/shared';
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { FingerprintIcon, headline, withPeriod } from '../ui';
 import { MicBars } from './MicBars';
@@ -7,7 +7,8 @@ interface Props {
   code: string;
   game: GameState;
   playerId: string | null;
-  players: PlayerInfo[];
+  /** A player's name, including players who have left. */
+  name(id: string): string;
   /** undefined until dealt; null means this player is the imposter. */
   secret: string | null | undefined;
   verdict: Verdict | null;
@@ -21,8 +22,7 @@ interface Props {
 }
 
 /** What the phone shows during a round it's playing in. */
-export function GamePanel({ code, game, playerId, players, secret, verdict, faceLost, analyser, serverNow, onDone, children }: Props) {
-  const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
+export function GamePanel({ code, game, playerId, name, secret, verdict, faceLost, analyser, serverNow, onDone, children }: Props) {
   const turn = game.turn;
   const caseNo = `No. ${code}-${game.round}`;
 

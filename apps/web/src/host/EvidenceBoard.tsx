@@ -68,36 +68,38 @@ export function EvidenceBoard({ room, round, onClose, closeLabel = 'Close' }: Pr
         )}
       </header>
 
-      <ul className="legend" aria-label="Legend">
-        <li>
-          <span className="key voice" />
-          Voice level
-        </li>
-        <li>
-          <span className="key lip" />
-          Lip press
-        </li>
-        <li>
-          <span className="key pitch" />
-          Pitch
-        </li>
-        <li>
-          <span className="key blink" />
-          Blink
-        </li>
-        <li>
-          <span className="key talk" />
-          Speaking
-        </li>
-        <li>
-          <span className="key window" />
-          Question, then answer
-        </li>
-        <li>
-          <span className="key spike">+2σ</span>
-          Spike against their own baseline
-        </li>
-      </ul>
+      {!error && (
+        <ul className="legend" aria-label="Legend">
+          <li>
+            <span className="key voice" />
+            Voice level
+          </li>
+          <li>
+            <span className="key lip" />
+            Lip press
+          </li>
+          <li>
+            <span className="key pitch" />
+            Pitch
+          </li>
+          <li>
+            <span className="key blink" />
+            Blink
+          </li>
+          <li>
+            <span className="key talk" />
+            Speaking
+          </li>
+          <li>
+            <span className="key window" />
+            Question, then answer
+          </li>
+          <li>
+            <span className="key spike">+2σ</span>
+            Spike against their own baseline
+          </li>
+        </ul>
+      )}
 
       {error && <p className="board-status bad">{error}</p>}
       {!data && !error && <p className="board-status">Loading the round…</p>}

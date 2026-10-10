@@ -66,6 +66,8 @@ function useViewport() {
 export function Host({ code }: { code: string }) {
   const socketRef = useRef<RoomSocket | null>(null);
   const roundRef = useRef(0);
+  /** Every name seen in this room, so players who leave keep theirs on the verdict. */
+  const knownNames = useRef(new Map<string, string>());
   const [audio] = useState(() => new HostAudio());
   const [soundOn, setSoundOn] = useState(false);
   const [soundBlocked, setSoundBlocked] = useState(false);
@@ -102,6 +104,7 @@ export function Host({ code }: { code: string }) {
         switch (msg.t) {
           case 'room':
             live.setRoster(msg.players);
+            for (const p of msg.players) knownNames.current.set(p.id, p.name);
             setPlayers(msg.players);
             break;
           case 'state':
@@ -161,6 +164,14 @@ export function Host({ code }: { code: string }) {
     };
   }, [code, audio]);
 
+  // Escape closes the evidence board, like any pop-up.
+  useEffect(() => {
+    if (evidence === null) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setEvidence(null);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [evidence]);
+
   const enableSound = () => {
     audio.unlock();
     setSoundOn(true);
@@ -173,7 +184,8 @@ export function Host({ code }: { code: string }) {
     socketRef.current?.send({ t });
   };
   const inRound = !!game && game.phase !== 'lobby';
-  const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
+  // Someone who left still has a name on the verdict.
+  const name = (id: string) => players.find((p) => p.id === id)?.name ?? knownNames.current.get(id) ?? 'Someone';
   const lastScored = (id: string) => answers.findLast((a) => a.playerId === id && a.kind !== 'baseline');
 
   // Where the lamp points: whoever is being questioned, a sweep during the drumroll, then the accused.
@@ -199,7 +211,8 @@ export function Host({ code }: { code: string }) {
     drift: revealed ? (revealed.scores.find((s) => s.playerId === p.id)?.delivery ?? null) : (lastScored(p.id)?.delivery ?? null),
     lastAnswer: answers.findLast((a) => a.playerId === p.id),
     benched: inRound && !game?.roundPlayers.includes(p.id),
-    role: revealed ? (p.id === revealed.imposterId ? 'imposter' : 'innocent') : undefined,
+    // Only players who were in the round get a role; anyone who joined since sits it out.
+    role: revealed && revealed.scores.some((s) => s.playerId === p.id) ? (p.id === revealed.imposterId ? 'imposter' : 'innocent') : undefined,
     stamp: revealed
       ? p.id === revealed.accusedId
         ? revealed.correct
@@ -260,7 +273,8 @@ export function Host({ code }: { code: string }) {
           )}
           {(inRound || soundBlocked) && (
             <nav className="top-actions" aria-label="Round controls">
-              {!soundOn && (inRound || soundBlocked) && (
+              {/* Blocked playback needs a click even after sound was turned on once. */}
+              {((!soundOn && inRound) || soundBlocked) && (
                 <button className={`btn ${revealed || !inRound ? 'glass' : 'gold'}`} onClick={enableSound}>
                   Turn on sound
                 </button>
