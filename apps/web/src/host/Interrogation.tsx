@@ -3,12 +3,12 @@ import { useEffect, useState } from 'react';
 
 const PHASE_LABEL: Record<Phase, string> = {
   lobby: 'Lobby',
-  baseline: 'Calibration',
+  baseline: 'Calibrating',
   deal: 'The deal',
   question: 'Questioning',
   followup: 'Follow-up',
   verdict: 'Verdict',
-  replay: 'Replay',
+  replay: 'Evidence',
 };
 
 interface Props {
@@ -20,12 +20,13 @@ interface Props {
   transcript: string;
   serverNow(): number;
   name(id: string): string;
+  onEvidence(): void;
   onPlayAgain(): void;
-  onEnd(): void;
+  onLobby(): void;
 }
 
-/** The big screen's left column during a round: what the detective is doing right now. */
-export function Interrogation({ game, verdict, line, transcript, serverNow, name, onPlayAgain, onEnd }: Props) {
+/** The big screen's overlay during a round: phase, subtitles, live transcript and the verdict. */
+export function Interrogation({ game, verdict, line, transcript, serverNow, name, onEvidence, onPlayAgain, onLobby }: Props) {
   const turn = game.turn;
   const ticking = game.phase === 'deal' || turn?.stage === 'answering';
   const [now, setNow] = useState(serverNow);
@@ -36,140 +37,84 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
   }, [ticking, serverNow]);
   const secondsUntil = (t: number | null) => (t === null ? null : Math.max(0, Math.ceil((t - now) / 1000)));
 
-  if (game.phase === 'verdict') {
-    if (game.verdictStage === 'deliberating' || !verdict) {
-      return (
-        <div className="interrogation">
-          <p className="phase-banner">Verdict</p>
-          {line ? <p className="subtitle">“{line.text}”</p> : <p className="subtitle muted">The detective is deliberating…</p>}
-        </div>
-      );
-    }
-    return (
-      <VerdictPanel
-        verdict={verdict}
-        revealed={game.verdictStage === 'revealed'}
-        line={line}
-        name={name}
-        onPlayAgain={onPlayAgain}
-        onEnd={onEnd}
-      />
-    );
-  }
+  const subtitle = line?.text ?? (turn?.stage === 'asking' ? turn.text : null);
+  const accusing = game.phase === 'verdict' && game.verdictStage !== 'deliberating' && verdict;
 
   return (
-    <div className="interrogation">
+    <div className="stage">
       <p className="phase-banner">
         {PHASE_LABEL[game.phase]}
-        {turn && turn.total > 1 && ` · ${turn.index}/${turn.total}`}
+        {turn && turn.total > 1 && (
+          <span className="muted">
+            {' '}
+            · {turn.index}/{turn.total}
+          </span>
+        )}
       </p>
+
+      {turn && game.phase !== 'verdict' && (
+        <p className="addressee">
+          Detective → <b>{name(turn.playerId)}</b>
+          {turn.stage === 'answering' && <span className="countdown"> · {secondsUntil(turn.answerDeadline)}s</span>}
+        </p>
+      )}
+      {subtitle && <p className="subtitle">“{subtitle}”</p>}
+      {turn?.stage === 'answering' && !line && <p className="subtitle quiet">“{turn.text}”</p>}
+      {turn?.stage === 'answering' && transcript && <p className="live-transcript">{transcript}</p>}
+
       {game.phase === 'deal' && (
         <>
-          <p className="subtitle">{line ? `“${line.text}”` : "Secrets dealt. Hold your card to read it. One of you doesn't know the word."}</p>
+          {!line && <p className="subtitle">Secrets dealt. Hold your card to read it.</p>}
           <p className="big-countdown">{secondsUntil(game.dealEndsAt)}</p>
         </>
       )}
-      {!turn && game.phase !== 'deal' && line && <p className="subtitle">“{line.text}”</p>}
-      {turn && (
-        <>
-          <p className="addressee">
-            Detective → <b>{name(turn.playerId)}</b>
-          </p>
-          <p className="subtitle">“{turn.text}”</p>
-          <p className={`turn-stage ${turn.stage}`}>
-            {turn.stage === 'asking' && 'asking…'}
-            {turn.stage === 'answering' && `answering · ${secondsUntil(turn.answerDeadline)}s`}
-            {turn.stage === 'scoring' && 'noted.'}
-          </p>
-          {transcript && <p className="live-transcript">{transcript}</p>}
-        </>
+      {game.phase === 'verdict' && game.verdictStage === 'deliberating' && !line && (
+        <p className="subtitle quiet">The detective is deliberating…</p>
       )}
-      <button className="button" onClick={onEnd}>
-        End round
-      </button>
-    </div>
-  );
-}
 
-interface VerdictProps {
-  verdict: Verdict;
-  /** False while the accusation is being spoken; the truth comes after. */
-  revealed: boolean;
-  line: SpokenLine | null;
-  name(id: string): string;
-  onPlayAgain(): void;
-  onEnd(): void;
-}
+      {accusing && (
+        <p className="accused-line">
+          <span className="muted">The detective accuses </span>
+          <span className="accused-name">{name(verdict.accusedId)}</span>
+        </p>
+      )}
 
-function VerdictPanel({ verdict, revealed, line, name, onPlayAgain, onEnd }: VerdictProps) {
-  const fmt = (v: number | null, digits = 2) => (v === null ? '–' : v.toFixed(digits));
-  if (!revealed) {
-    return (
-      <div className="verdict">
-        <p className="phase-banner">Verdict</p>
-        <p className="muted">The detective accuses</p>
-        <p className="accused-name">{name(verdict.accusedId)}</p>
-        <p className="subtitle">“{line?.text ?? verdict.spoken}”</p>
-        <ul className="evidence">
-          {verdict.evidence.map((e) => (
-            <li key={e}>{e}</li>
+      {/* The result takes the top of the screen once the truth is out; the face stays visible. */}
+      {game.phase === 'verdict' && game.verdictStage === 'revealed' && verdict && (
+        <div className={`result ${verdict.correct ? 'caught' : 'missed'}`}>
+          <p className="result-stamp">{verdict.correct ? 'Caught' : 'Escaped'}</p>
+          <p>
+            The imposter was <b>{name(verdict.imposterId)}</b>. The word was <b className="word">{verdict.word}</b>.
+          </p>
+          <p className="muted small">
+            {verdict.source === 'gemini'
+              ? `Gemini verdict${verdict.confidence !== null ? `, ${Math.round(verdict.confidence * 100)}% sure` : ''}`
+              : 'Local verdict (Gemini was unavailable)'}
+          </p>
+          <div className="button-row">
+            <button className="button primary" onClick={onEvidence}>
+              Evidence board
+            </button>
+            <button className="button" onClick={onPlayAgain}>
+              Play again
+            </button>
+            <button className="button" onClick={onLobby}>
+              Lobby
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Evidence chips appear one by one along the bottom, below the suspects' cards. */}
+      {accusing && game.verdictStage === 'accusing' && (
+        <ul className="evidence-chips dock">
+          {verdict.evidence.map((e, i) => (
+            <li key={e} style={{ animationDelay: `${0.4 + i * 0.9}s` }}>
+              {e}
+            </li>
           ))}
         </ul>
-      </div>
-    );
-  }
-  return (
-    <div className="verdict">
-      <p className="phase-banner">Verdict</p>
-      <p className="muted">The detective accused</p>
-      <p className="accused-name">{name(verdict.accusedId)}</p>
-      <p className={`verdict-result ${verdict.correct ? 'caught' : 'missed'}`}>
-        {verdict.correct ? 'Caught.' : 'Wrong.'} The imposter was <b>{name(verdict.imposterId)}</b>.
-      </p>
-      <p className="muted">
-        The word was <b className="word">{verdict.word}</b>
-      </p>
-      <ul className="evidence">
-        {verdict.evidence.map((line) => (
-          <li key={line}>{line}</li>
-        ))}
-      </ul>
-      <table className="scores">
-        <thead>
-          <tr>
-            <th>Suspect</th>
-            <th>Delivery</th>
-            <th>Content</th>
-            <th>Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          {[...verdict.scores]
-            .sort((a, b) => b.combined - a.combined)
-            .map((s) => (
-              <tr key={s.playerId} className={s.playerId === verdict.accusedId ? 'top' : ''}>
-                <td>{name(s.playerId)}</td>
-                <td>{fmt(s.delivery)}</td>
-                <td>{fmt(s.content)}</td>
-                <td>{fmt(s.combined)}</td>
-              </tr>
-            ))}
-        </tbody>
-      </table>
-      {line && <p className="subtitle">“{line.text}”</p>}
-      <p className="muted small">
-        {verdict.source === 'gemini'
-          ? `Gemini verdict${verdict.confidence !== null ? `, ${Math.round(verdict.confidence * 100)}% sure` : ''}`
-          : 'Local verdict (Gemini was unavailable)'}
-      </p>
-      <div className="button-row">
-        <button className="button primary" onClick={onPlayAgain}>
-          Play again
-        </button>
-        <button className="button" onClick={onEnd}>
-          Lobby
-        </button>
-      </div>
+      )}
     </div>
   );
 }

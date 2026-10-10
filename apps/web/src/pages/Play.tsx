@@ -55,7 +55,10 @@ export function Play({ code }: { code: string }) {
   // iOS can pause the AudioContext when capture starts; the mic track still looks fine.
   const [audioAsleep, setAudioAsleep] = useState(false);
   const [signals, setSignals] = useState<PhoneSignals | null>(null);
-  const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') !== '0');
+  const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') === '1');
+  /** During a round only the health dot shows; tapping it shows the details. */
+  const [showHealth, setShowHealth] = useState(false);
+  const [faceLost, setFaceLost] = useState(false);
   const [game, setGame] = useState<GameState | null>(null);
   /** undefined until dealt; null means this player is the imposter. */
   const [secret, setSecret] = useState<string | null | undefined>(undefined);
@@ -127,6 +130,17 @@ export function Play({ code }: { code: string }) {
   }, [code]);
 
   useEffect(() => () => mediaRef.current?.stop(), []);
+
+  // Warn when the face has been out of view for more than a moment.
+  useEffect(() => {
+    if (!signals) return;
+    let lastSeen = Date.now();
+    const id = setInterval(() => {
+      if (signals.face?.face.present ?? true) lastSeen = Date.now();
+      setFaceLost(Date.now() - lastSeen > 1500);
+    }, 300);
+    return () => clearInterval(id);
+  }, [signals]);
 
   // Once the camera is live: analyse face and voice and stream them at 10 Hz.
   useEffect(() => {
@@ -276,7 +290,11 @@ export function Play({ code }: { code: string }) {
       <header className="phone-bar">
         <span className="wordmark small">DEADPAN</span>
         <span className="room-tag">Room {code}</span>
-        {stage === 'live' && <span className={`dot ${allOk ? 'ok' : 'bad'}`} aria-label={allOk ? 'All good' : 'Problem'} />}
+        {stage === 'live' && (
+          <button className="health-dot" onClick={() => setShowHealth((v) => !v)} aria-label={allOk ? 'Camera, mic and connection OK' : 'Something needs attention'}>
+            <span className={`dot ${allOk ? 'ok' : 'bad'}`} />
+          </button>
+        )}
       </header>
 
       {serverError && <p className="banner bad">{serverError}</p>}
@@ -341,25 +359,31 @@ export function Play({ code }: { code: string }) {
 
       {stage === 'live' && (
         <section className="live">
-          <ul className="checks">
-            <li className={health.cam ? 'ok' : 'bad'}>Camera</li>
-            <li className={health.mic ? 'ok' : 'bad'}>Mic</li>
-            <li className={connected ? 'ok' : 'bad'}>
-              Server{rtt !== null && <span className="muted"> {rtt} ms</span>}
-            </li>
-          </ul>
-          <div className="meter" aria-label="Mic level">
-            <div ref={meterRef} className="meter-fill" />
-          </div>
-          <p>
-            {me ? (
-              <>
-                You're in as <b>{me.name}</b>. {players.length} {players.length === 1 ? 'player' : 'players'} in the room.
-              </>
-            ) : (
-              'Joining…'
-            )}
-          </p>
+          {(!inRound || showHealth || !allOk) && (
+            <>
+              <ul className="checks">
+                <li className={health.cam ? 'ok' : 'bad'}>Camera</li>
+                <li className={health.mic ? 'ok' : 'bad'}>Mic</li>
+                <li className={connected ? 'ok' : 'bad'}>
+                  Server{rtt !== null && <span className="muted"> {rtt} ms</span>}
+                </li>
+              </ul>
+              <div className="meter" aria-label="Mic level">
+                <div ref={meterRef} className="meter-fill" />
+              </div>
+            </>
+          )}
+          {!inRound && (
+            <p>
+              {me ? (
+                <>
+                  You're in as <b>{me.name}</b>. {players.length} {players.length === 1 ? 'player' : 'players'} in the room.
+                </>
+              ) : (
+                'Joining…'
+              )}
+            </p>
+          )}
           {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
           <GamePanel
             game={game}
@@ -368,6 +392,7 @@ export function Play({ code }: { code: string }) {
             secret={secret}
             verdict={verdict}
             serverNow={serverNow}
+            faceLost={faceLost}
             onDone={(turnId) => turnsRef.current?.done(turnId)}
           />
           {(!health.cam || (!health.mic && !audioAsleep)) && (

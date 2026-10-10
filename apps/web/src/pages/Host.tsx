@@ -2,9 +2,11 @@ import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type S
 import QRCode from 'qrcode';
 import { useEffect, useRef, useState } from 'react';
 import { HostAudio } from '../host/audio';
+import { EvidenceBoard } from '../host/EvidenceBoard';
 import { Interrogation } from '../host/Interrogation';
 import { live } from '../host/live';
-import { SuspectCard } from '../host/SuspectCard';
+import { Room, type SuspectView } from '../host/Room';
+import { SuspectCards } from '../host/SuspectCards';
 import { RoomSocket } from '../lib/socket';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -25,6 +27,8 @@ export function Host({ code }: { code: string }) {
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [transcript, setTranscript] = useState<{ turnId: string; text: string } | null>(null);
   const [notice, setNotice] = useState('');
+  /** The round shown on the evidence board, if it's open. */
+  const [evidence, setEvidence] = useState<number | null>(null);
   const joinUrl = `${location.origin}/play/${code}`;
 
   useEffect(() => {
@@ -106,17 +110,87 @@ export function Host({ code }: { code: string }) {
   const send = (t: 'start_round' | 'end_round') => {
     // Starting a round is a click, which is what browsers need before they play sound.
     if (t === 'start_round') enableSound();
+    setEvidence(null);
     socketRef.current?.send({ t });
   };
   const inRound = !!game && game.phase !== 'lobby';
   const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
-  const lastAnswer = (id: string) => answers.findLast((a) => a.playerId === id);
+  const lastScored = (id: string) => answers.findLast((a) => a.playerId === id && a.kind !== 'baseline');
+
+  // Where the lamp points: whoever is being questioned, a sweep during the drumroll, then the accused.
+  const turn = game?.turn ?? null;
+  const verdictShown = game?.phase === 'verdict' && game.verdictStage !== 'deliberating' && verdict;
+  const focus: string | 'sweep' | null =
+    game?.phase === 'verdict' ? (verdictShown ? verdict.accusedId : 'sweep') : (turn?.playerId ?? null);
+  const activeId = verdictShown ? verdict.accusedId : (turn?.playerId ?? null);
+  const revealed = game?.phase === 'verdict' && game.verdictStage === 'revealed' && verdict;
+
+  const suspects: SuspectView[] = players.map((p) => ({
+    player: p,
+    drift: lastScored(p.id)?.delivery ?? null,
+    lastAnswer: answers.findLast((a) => a.playerId === p.id),
+    benched: inRound && !game?.roundPlayers.includes(p.id),
+    badge: revealed
+      ? p.id === verdict.accusedId && p.id === verdict.imposterId
+        ? 'both'
+        : p.id === verdict.accusedId
+          ? 'accused'
+          : p.id === verdict.imposterId
+            ? 'imposter'
+            : undefined
+      : verdictShown && p.id === verdict.accusedId
+        ? 'accused'
+        : undefined,
+  }));
 
   return (
-    <main className={`host ${players.length > 0 ? 'has-players' : ''}`}>
-      <section className="host-join">
-        <h1 className="wordmark">DEADPAN</h1>
-        {inRound && game ? (
+    <main className="host-stage">
+      <Room suspects={suspects} focus={focus} activeId={activeId} calibrating={game?.phase === 'baseline'} />
+      <SuspectCards suspects={suspects} activeId={activeId} />
+
+      <div className="overlay">
+        <header className="top-bar">
+          <span className="wordmark small">DEADPAN</span>
+          <span className="muted small">
+            <span className={`dot ${connected ? 'ok' : 'bad'}`} /> Room {code}
+            {inRound && ` · join at ${location.host}/play/${code}`}
+          </span>
+          <span className="top-actions">
+            {!soundOn && (inRound || soundBlocked) && (
+              <button className="button primary" onClick={enableSound}>
+                Turn on the detective's voice
+              </button>
+            )}
+            {inRound && game.phase !== 'verdict' && (
+              <button className="button ghost" onClick={() => send('end_round')}>
+                End round
+              </button>
+            )}
+          </span>
+        </header>
+
+        {!inRound && (
+          <section className="lobby-panel">
+            <h1 className="wordmark">DEADPAN</h1>
+            <p className="tagline">One of you is lying. The detective is listening.</p>
+            <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
+            <p className="join-url">
+              {location.host}/play/<b>{code}</b>
+            </p>
+            <p className="muted small">
+              {players.length === 0 ? 'Waiting for suspects…' : `${players.length}/${MAX_PLAYERS} suspects in the room`}
+            </p>
+            <button className="button primary huge" disabled={players.length === 0} onClick={() => send('start_round')}>
+              Start round
+            </button>
+            {players.length === 1 && <p className="muted small">Imposter needs 2+ players. One works for testing.</p>}
+            {LOCAL_HOSTS.has(location.hostname) && (
+              <p className="banner warn">Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.</p>
+            )}
+          </section>
+        )}
+
+        {inRound && game && (
           <Interrogation
             game={game}
             verdict={verdict}
@@ -124,71 +198,19 @@ export function Host({ code }: { code: string }) {
             transcript={transcript && transcript.turnId === game.turn?.id ? transcript.text : ''}
             serverNow={() => socketRef.current?.clock.now() ?? Date.now()}
             name={name}
+            onEvidence={() => setEvidence(game.round)}
             onPlayAgain={() => send('start_round')}
-            onEnd={() => send('end_round')}
+            onLobby={() => send('end_round')}
           />
-        ) : (
-          <>
-            <div className="qr">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
-            <p className="muted">Scan to join, or open</p>
-            <p className="join-url">
-              {location.host}/play/<b>{code}</b>
-            </p>
-            <button className="button primary huge" disabled={players.length === 0} onClick={() => send('start_round')}>
-              Start round
-            </button>
-            {players.length === 1 && <p className="muted small">Imposter needs 2+ players. One player works for testing.</p>}
-            {LOCAL_HOSTS.has(location.hostname) && (
-              <p className="banner warn">
-                Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.
-              </p>
-            )}
-          </>
         )}
-        {notice && <p className="banner bad">{notice}</p>}
-        {!soundOn && (inRound || soundBlocked) && (
-          <button className="button primary" onClick={enableSound}>
-            Turn on the detective's voice
-          </button>
-        )}
-      </section>
+        {notice && <p className="banner bad notice">{notice}</p>}
+      </div>
 
-      <section className="host-players">
-        <header>
-          <h2>Suspects</h2>
-          <span className="muted">
-            {players.length}/{MAX_PLAYERS}
-          </span>
-        </header>
-        {players.length === 0 ? (
-          <p className="muted waiting">Waiting for players…</p>
-        ) : (
-          <div className={`suspect-grid count-${players.length}`}>
-            {players.map((p) => (
-              <SuspectCard
-                key={p.id}
-                player={p}
-                active={game?.turn?.playerId === p.id}
-                benched={inRound && !game?.roundPlayers.includes(p.id)}
-                lastAnswer={lastAnswer(p.id)}
-                badge={
-                  game?.phase === 'verdict' && verdict
-                    ? p.id === verdict.accusedId
-                      ? 'accused'
-                      : p.id === verdict.imposterId
-                        ? 'imposter'
-                        : undefined
-                    : undefined
-                }
-              />
-            ))}
-          </div>
-        )}
-        <footer className="muted small">
-          <span className={`dot ${connected ? 'ok' : 'bad'}`} /> {connected ? `Room ${code} is live` : 'Reconnecting…'}
-          {inRound && <span> · join at {location.host}/play/{code}</span>}
-        </footer>
-      </section>
+      {evidence !== null && (
+        <div className="board-backdrop">
+          <EvidenceBoard room={code} round={evidence} onClose={() => setEvidence(null)} />
+        </div>
+      )}
     </main>
   );
 }

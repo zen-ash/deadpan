@@ -1,4 +1,4 @@
-import type { GameState, PlayerInfo, TurnInfo, Verdict } from '@deadpan/shared';
+import { ANSWER_CAP_MS, type GameState, type PlayerInfo, type TurnInfo, type Verdict } from '@deadpan/shared';
 import { useEffect, useState } from 'react';
 
 interface Props {
@@ -8,12 +8,14 @@ interface Props {
   /** undefined until dealt; null means this player is the imposter. */
   secret: string | null | undefined;
   verdict: Verdict | null;
+  /** The face has been out of the camera's view for a moment. */
+  faceLost: boolean;
   serverNow(): number;
   onDone(turnId: string): void;
 }
 
 /** What the phone shows during a round. */
-export function GamePanel({ game, playerId, players, secret, verdict, serverNow, onDone }: Props) {
+export function GamePanel({ game, playerId, players, secret, verdict, faceLost, serverNow, onDone }: Props) {
   const name = (id: string) => players.find((p) => p.id === id)?.name ?? 'Someone';
 
   if (!game || game.phase === 'lobby') {
@@ -29,7 +31,7 @@ export function GamePanel({ game, playerId, players, secret, verdict, serverNow,
         </div>
       );
     }
-    return <p className="phase-note">The detective is deliberating…</p>;
+    return <p className="phase-note center">The detective is deliberating…</p>;
   }
   if (!playerId || !game.roundPlayers.includes(playerId)) {
     return <p className="muted">A round is in progress. You'll play in the next one.</p>;
@@ -39,7 +41,7 @@ export function GamePanel({ game, playerId, players, secret, verdict, serverNow,
   const mine = turn?.playerId === playerId;
   return (
     <div className="game">
-      {turn && mine && <MyTurn turn={turn} serverNow={serverNow} onDone={onDone} />}
+      {turn && mine && <MyTurn turn={turn} faceLost={faceLost} serverNow={serverNow} onDone={onDone} />}
       {turn && !mine && (
         <p className="phase-note">
           {turn.kind === 'baseline' ? 'Calibrating ' : 'Questioning '}
@@ -47,33 +49,56 @@ export function GamePanel({ game, playerId, players, secret, verdict, serverNow,
           {turn.kind === 'baseline' ? '. Stay relaxed.' : '. Watch them closely.'}
         </p>
       )}
+      {!turn && game.phase === 'baseline' && <p className="phase-note">The detective is setting the scene. Answer naturally when it's your turn.</p>}
+      {!turn && (game.phase === 'question' || game.phase === 'followup') && <p className="phase-note">The detective is thinking…</p>}
       {game.phase === 'deal' && <p className="phase-note">Check your secret. Don't let anyone see it.</p>}
       {secret !== undefined && <SecretCard secret={secret} />}
     </div>
   );
 }
 
-function MyTurn({ turn, serverNow, onDone }: { turn: TurnInfo; serverNow(): number; onDone(turnId: string): void }) {
+function MyTurn({ turn, faceLost, serverNow, onDone }: { turn: TurnInfo; faceLost: boolean; serverNow(): number; onDone(turnId: string): void }) {
   const [now, setNow] = useState(serverNow);
   useEffect(() => {
     if (turn.stage !== 'answering') return;
-    const id = setInterval(() => setNow(serverNow()), 250);
+    const id = setInterval(() => setNow(serverNow()), 100);
     return () => clearInterval(id);
   }, [turn.stage, serverNow]);
 
-  const left = turn.answerDeadline !== null ? Math.max(0, Math.ceil((turn.answerDeadline - now) / 1000)) : null;
+  // A buzz when the detective turns to you (Android; iPhones don't allow vibration from the web).
+  useEffect(() => {
+    navigator.vibrate?.([70, 50, 70]);
+  }, [turn.id]);
+
+  const left = turn.answerDeadline !== null ? Math.max(0, turn.answerDeadline - now) : ANSWER_CAP_MS;
+  const ring = 2 * Math.PI * 54;
   return (
     <div className={`my-turn ${turn.stage}`}>
-      <p className="turn-label">{turn.kind === 'baseline' ? 'Calibration: answer naturally' : 'Your turn'}</p>
+      <p className="turn-label">{turn.kind === 'baseline' ? 'Calibration · answer naturally' : 'Your turn'}</p>
       <p className="turn-question">“{turn.text}”</p>
+      {faceLost && <p className="banner warn">Keep your face in the camera.</p>}
       {turn.stage === 'asking' && <p className="muted">Listen to the detective…</p>}
       {turn.stage === 'answering' && (
         <>
-          <p className="answer-hint">
-            Answer out loud{left !== null && <span className="countdown"> · {left}s</span>}
-          </p>
-          <button className="button primary huge" onClick={() => onDone(turn.id)}>
-            Tap when done
+          <p className="answer-hint">Answer out loud</p>
+          <button className="done-button" onClick={() => onDone(turn.id)}>
+            <svg viewBox="0 0 120 120" aria-hidden>
+              <circle className="done-track" cx="60" cy="60" r="54" />
+              <circle
+                className="done-progress"
+                cx="60"
+                cy="60"
+                r="54"
+                strokeDasharray={ring}
+                strokeDashoffset={ring * (1 - left / ANSWER_CAP_MS)}
+              />
+            </svg>
+            <span className="done-label">
+              Tap when
+              <br />
+              done
+              <small>{Math.ceil(left / 1000)}s</small>
+            </span>
           </button>
         </>
       )}
@@ -95,18 +120,26 @@ function SecretCard({ secret }: { secret: string | null }) {
       onPointerCancel={hide}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {!shown && <span className="secret-hint">Hold to see your secret</span>}
+      <span className="secret-tab">Case file · top secret</span>
+      {!shown && (
+        <span className="secret-hint">
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M12 3a7 7 0 0 0-7 7v3M19 13v-3a7 7 0 0 0-11.2-5.6M9 21v-8a3 3 0 0 1 6 0v8M12 11v10M6 17v-2M18 18v-5" />
+          </svg>
+          Press and hold to read
+        </span>
+      )}
       {shown && secret === null && (
         <>
-          <span className="secret-label">You are the</span>
-          <strong>IMPOSTER</strong>
-          <span className="secret-label">Blend in. Don't get caught.</span>
+          <strong className="stamp">Imposter</strong>
+          <span className="secret-label">You don't know the word. Blend in. Don't get caught.</span>
         </>
       )}
       {shown && secret !== null && (
         <>
           <span className="secret-label">The secret word is</span>
-          <strong>{secret.toUpperCase()}</strong>
+          <strong className="secret-word">{secret.toUpperCase()}</strong>
+          <span className="secret-label">Describe it without saying it.</span>
         </>
       )}
     </button>
@@ -117,11 +150,11 @@ function VerdictCard({ verdict, playerId, name }: { verdict: Verdict; playerId: 
   const wasImposter = playerId === verdict.imposterId;
   return (
     <div className={`verdict-card ${verdict.correct ? 'caught' : 'missed'}`}>
-      <p className="muted">The detective accuses</p>
+      <p className="muted">The detective accused</p>
       <strong className="accused">{name(verdict.accusedId)}</strong>
+      <span className="stamp small">{verdict.correct ? 'Caught' : 'Escaped'}</span>
       <p>
-        {verdict.correct ? 'Caught. ' : 'Wrong. '}The imposter was <b>{name(verdict.imposterId)}</b> and the word was{' '}
-        <b>{verdict.word}</b>.
+        The imposter was <b>{name(verdict.imposterId)}</b> and the word was <b>{verdict.word}</b>.
       </p>
       {wasImposter && <p className="verdict-you">{verdict.correct ? 'You got caught.' : 'You fooled the detective!'}</p>}
     </div>

@@ -83,8 +83,10 @@ export class PhoneSignals {
         ? { ...face.face }
         : { present: false, blinkPm: 0, blinkCount: 0, lipPress: 0, brow: 0, gazeOff: 0, headMotion: 0, speaking: false },
       voice: { pitchHz: voice.pitchHz, clarity: voice.clarity, vad: this.voice.speaking, rms: voice.rms },
-      // Camera heart rate isn't built yet; it's decorative and never used in the verdict.
-      hr: { bpm: null, quality: 0 },
+      // Decorative only: shown on the big screen, never used in the verdict.
+      hr: face?.face.present
+        ? { bpm: face.heart.bpm === null ? null : Math.round(face.heart.bpm), quality: Math.round(face.heart.quality * 100) / 100 }
+        : { bpm: null, quality: 0 },
     };
     this.sink.send({ t: 'features', ...packet });
     this.lastPacket = packet;

@@ -43,6 +43,12 @@ export function DebugOverlay({ signals, scribe }: { signals: PhoneSignals; scrib
           </div>
         </>
       )}
+      {face && (
+        <div>
+          <b>heart</b> {face.heart.bpm === null ? '–' : `${face.heart.bpm.toFixed(0)} bpm`}{' '}
+          <span className="dim">quality {n(face.heart.quality)}</span>
+        </div>
+      )}
       <div>
         <b>pitch</b> {voice.lastPitchHz ? `${voice.lastPitchHz.toFixed(0)} Hz` : '–'}{' '}
         <span className="dim">clarity {n(voice.lastClarity)}</span>

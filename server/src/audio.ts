@@ -156,6 +156,12 @@ export async function dynamic(tts: string): Promise<Line | null> {
   return ok ? { id, url: `/api/line/${id}.mp3`, text: displayText(tts), expectedMs: estimateMs(tts) } : null;
 }
 
+/** A finished dynamic line's audio, for saving with the round recording. */
+export function dynamicAudio(id: string): Buffer | null {
+  const stream = streams.get(id);
+  return stream && stream.done && !stream.failed && stream.chunks.length > 0 ? Buffer.concat(stream.chunks) : null;
+}
+
 /** GET /api/line/:file — a cached canned line, or a dynamic line as it streams in. */
 export async function serveLine(req: Request, res: Response) {
   const id = String(req.params.file ?? '').replace(/\.mp3$/, '');

@@ -3,6 +3,7 @@
 import { MESH_HEADER, MESH_MAGIC, MESH_POINTS, MESH_QUANT, type FaceFeatures } from '@deadpan/shared';
 import type { FaceLandmarker, FaceLandmarkerOptions, FaceLandmarkerResult, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { VENDOR } from '../vendor';
+import { HeartRate } from './heart';
 
 const TARGET_FPS = 15;
 const BLINK_WINDOW_MS = 60_000;
@@ -71,6 +72,8 @@ export class FaceTracker {
   mesh: Int16Array<ArrayBuffer> | null = null;
   /** Bumped every time `mesh` changes, so senders can skip duplicates. */
   meshVersion = 0;
+  /** Camera heart rate, from skin colour in the same frames. */
+  readonly heart = new HeartRate();
 
   private readonly blinks = new BlinkCounter();
   private readonly lipPress = new Smoother(0.25);
@@ -189,6 +192,7 @@ export class FaceTracker {
 
     this.mesh = quantizeMesh(landmarks, w, h);
     this.meshVersion++;
+    this.heart.addFrame(this.video, landmarks, now, this.motion.value);
   }
 }
 

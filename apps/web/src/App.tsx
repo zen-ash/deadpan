@@ -5,6 +5,7 @@ import { Play } from './pages/Play';
 
 // The big screen pulls in three.js; phones never download it.
 const Host = lazy(() => import('./pages/Host').then((m) => ({ default: m.Host })));
+const EvidenceBoard = lazy(() => import('./host/EvidenceBoard').then((m) => ({ default: m.EvidenceBoard })));
 
 function Message({ title, body }: { title: string; body: string }) {
   return (
@@ -39,7 +40,16 @@ export function App() {
   }
   if (kind === 'play' && !round) return <Play code={code} />;
   if (kind === 'replay' && round) {
-    return <Message title={`Room ${code}, round ${round}`} body="The evidence board arrives in a later milestone." />;
+    return (
+      <Suspense fallback={<main className="center-page muted">Loading the evidence board…</main>}>
+        <main className="replay-page">
+          <EvidenceBoard room={code} round={Number(round)} />
+          <a className="button" href={`/host/${code}`}>
+            Back to room {code}
+          </a>
+        </main>
+      </Suspense>
+    );
   }
   return <Message title="Nothing here" body="That page doesn't exist." />;
 }

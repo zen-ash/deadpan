@@ -35,6 +35,10 @@ const LINE_END_WINDOW = { before: 2000, after: 300, fallbackLag: 0 };
 
 const rooms = new Map<string, Room>();
 
+export function findRoom(code: string): Room | undefined {
+  return rooms.get(code);
+}
+
 function getRoom(code: string): Room {
   let room = rooms.get(code);
   if (!room) {
@@ -117,6 +121,7 @@ function forwardMesh(conn: Conn, data: RawData) {
   if (frame.length !== MESH_BYTES || frame.readInt16LE(0) !== MESH_MAGIC) return;
   frame.writeInt16LE(conn.player.slot, 2);
   sendToHosts(conn.room, frame, { live: true });
+  conn.room.game.onMesh(conn.player, frame);
 }
 
 /** Trims and shortens the name, and adds " 2", " 3"… if someone in the room already has it. */
@@ -219,6 +224,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       const features = sanitizeFeatures(msg);
       if (!features) return conn;
       recordSample(conn.player, features);
+      conn.room.game.onSample(conn.player, features);
       sendToHosts(conn.room, { t: 'pf', id: conn.player.id, ...features }, { live: true });
       return conn;
     }

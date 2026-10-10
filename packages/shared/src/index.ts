@@ -242,3 +242,50 @@ export type ServerToClient =
   | { t: 'speech'; id: string; on: boolean; ts: number }
   | { t: 'live_transcript'; playerId: string; turnId: string; text: string; final: boolean }
   | ({ t: 'answer' } & AnswerResult);
+
+// Round recordings (no database): written to rounds/<room>-<round>.json when a round ends, and
+// read back by the evidence board and demo mode. Times are server time in ms.
+
+/**
+ * One 10 Hz signal sample: [t, pitchHz or -1, rms, blinkCount, lipPress, brow, gazeOff, headMotion,
+ * heart bpm or -1, heart quality, face present (0/1), speaking (0/1)].
+ */
+export type RoundSample = [number, number, number, number, number, number, number, number, number, number, number, number];
+
+export interface RoundTurn {
+  id: string;
+  kind: TurnKind;
+  playerId: string;
+  question: string;
+  askedAt: number;
+  questionEnd: number | null;
+  answerEnd: number | null;
+}
+
+export interface RoundLine {
+  id: string;
+  url: string;
+  text: string;
+  at: number;
+}
+
+export interface RoundFile {
+  version: 1;
+  room: string;
+  round: number;
+  startedAt: number;
+  endedAt: number;
+  word: string | null;
+  imposterId: string | null;
+  players: { id: string; name: string; slot: number }[];
+  turns: RoundTurn[];
+  answers: AnswerResult[];
+  transcripts: { turnId: string; playerId: string; text: string; words: TranscriptWord[] }[];
+  samples: Record<string, RoundSample[]>;
+  speech: Record<string, [number, 0 | 1][]>;
+  /** Face mesh frames at 5 Hz, as base64 of the binary frame (see MESH_MAGIC). */
+  meshes: Record<string, [number, string][]>;
+  lines: RoundLine[];
+  sfx: { name: SfxName; at: number }[];
+  verdict: Verdict | null;
+}

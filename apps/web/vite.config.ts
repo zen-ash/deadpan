@@ -12,8 +12,9 @@ export default defineConfig({
     __VENDOR_PATHS__: JSON.stringify(vendor.paths),
   },
   build: {
-    // The big-screen chunk carries three.js (~250 kB gzipped); phones never load it.
-    chunkSizeWarningLimit: 1000,
+    // The big-screen chunk carries three.js and the post-processing effects (~280 kB gzipped);
+    // phones never load it.
+    chunkSizeWarningLimit: 1200,
   },
   server: {
     // Phones reach the dev server through a cloudflared quick tunnel.

@@ -31,6 +31,11 @@ const Z_LIMIT = 3;
 const MIN_SCALE = { rtMs: 500, pitchSt: 1.5, fillerRate: 0.05, pauseRatio: 0.12, wordsPerSec: 0.6, blinkPm: 15, lip: 0.04 };
 /** Population defaults for a feature the baseline didn't capture. */
 const PRIOR = { rtMs: 1100, fillerRate: 0.03, pauseRatio: 0.15, wordsPerSec: 2.6, blinkPm: 15, lip: 0.05 };
+/**
+ * A calibration answer that took longer than this to start means the player hadn't noticed it
+ * was their turn, not that they're slow. Those don't count towards the baseline response time.
+ */
+const MISSED_TURN_MS = 3000;
 
 export interface Window {
   start: number;
@@ -184,7 +189,7 @@ export function buildBaseline(answers: AnswerMetrics[], samples: Sample[], windo
     .map((s) => s.f.face.lipPress);
 
   return {
-    rt: stat(answers.map((a) => a.rtMs), PRIOR.rtMs, MIN_SCALE.rtMs),
+    rt: stat(answers.map((a) => (a.rtMs !== null && a.rtMs <= MISSED_TURN_MS ? a.rtMs : null)), PRIOR.rtMs, MIN_SCALE.rtMs),
     pitchHz: voiced.length >= 5 ? median(voiced) : null,
     fillerRate: stat(answers.map(fillerRate), PRIOR.fillerRate, MIN_SCALE.fillerRate),
     pauseRatio: stat(answers.map(pauseRatio), PRIOR.pauseRatio, MIN_SCALE.pauseRatio),
