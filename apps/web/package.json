@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@deadpan/shared": "workspace:*",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
     "@mediapipe/tasks-vision": "1.0.1",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",

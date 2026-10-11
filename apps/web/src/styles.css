@@ -5,7 +5,7 @@
 
 :root {
   --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
-  --sans: 'Instrument Sans', -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  --sans: 'Instrument Sans Variable', 'Instrument Sans', -apple-system, 'Helvetica Neue', Arial, sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
   /* Light surfaces */
@@ -1358,6 +1358,40 @@ button.room-tag {
 }
 
 /* Answering */
+
+/* The detective turns to you: the whole phone flashes gold for a moment (iPhones can't vibrate from
+   the web), bright enough to catch from the corner of your eye. Taps go straight through it. */
+.turn-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, #f6d873 0%, var(--gold) 100%);
+  pointer-events: none;
+  animation: turn-flash 1400ms ease-out forwards;
+}
+
+.turn-flash span {
+  color: #000;
+  font: 400 72px/1 var(--serif);
+  letter-spacing: -0.035em;
+}
+
+@keyframes turn-flash {
+  0% {
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
 
 .ask-eyebrow {
   color: var(--gold-ink);

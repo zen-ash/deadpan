@@ -128,6 +128,8 @@ function lengthClass(text: string, long: number, longer: number): string {
 
 const ARC_R = 108;
 const ARC = 2 * Math.PI * ARC_R;
+/** How long the "your turn" flash stays up, matching its animation in styles.css. */
+const FLASH_MS = 1400;
 
 function MyTurn({
   turn,
@@ -151,9 +153,14 @@ function MyTurn({
     return () => clearInterval(id);
   }, [turn.stage, serverNow]);
 
-  // A buzz when the detective turns to you (Android; iPhones don't allow vibration from the web).
+  // When the detective turns to you: a buzz on Android, and on every phone a gold flash over the
+  // whole screen, since iPhones don't allow vibration from the web.
+  const [flash, setFlash] = useState(true);
   useEffect(() => {
     navigator.vibrate?.([70, 50, 70]);
+    setFlash(true);
+    const id = setTimeout(() => setFlash(false), FLASH_MS);
+    return () => clearTimeout(id);
   }, [turn.id]);
 
   const answering = turn.stage === 'answering';
@@ -171,6 +178,11 @@ function MyTurn({
 
   return (
     <>
+      {flash && (
+        <div className="turn-flash" aria-hidden>
+          <span>Your turn.</span>
+        </div>
+      )}
       <p className="eyebrow ask-eyebrow">{eyebrow}</p>
       <h1 className={`ask-question ${lengthClass(turn.text, 70, 130)}`}>“{turn.text}”</h1>
       <p className="ask-hint">{turn.stage === 'asking' ? 'Listen to the detective.' : turn.stage === 'answering' ? 'Answer out loud.' : 'Got it.'}</p>

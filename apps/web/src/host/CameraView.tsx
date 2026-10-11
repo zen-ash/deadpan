@@ -392,7 +392,7 @@ function drawView(ctx: CanvasRenderingContext2D, w: number, h: number, now: numb
   brackets(ctx, vx + 6, vy + 6, vw - 12, vh - 12, Math.min(22, vw * 0.08), `rgba(${CREAM}, 0.45)`, 1.5);
   const zoom = lens.s / fit;
   if (zoom > 1.15) {
-    ctx.font = '600 11px "Instrument Sans", sans-serif';
+    ctx.font = '600 11px "Instrument Sans Variable", "Instrument Sans", sans-serif';
     ctx.fillStyle = `rgba(${CREAM}, 0.6)`;
     ctx.textAlign = 'right';
     ctx.fillText(`${zoom.toFixed(1)}×`, vx + vw - 12, vy + 22);
@@ -426,7 +426,7 @@ function drawView(ctx: CanvasRenderingContext2D, w: number, h: number, now: numb
   shown.meshPrimed = false;
 
   ctx.fillStyle = `rgba(${CREAM}, 0.55)`;
-  ctx.font = '500 13px "Instrument Sans", sans-serif';
+  ctx.font = '500 13px "Instrument Sans Variable", "Instrument Sans", sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(!f ? 'Waiting for the phone' : f.face.present ? 'Starting the tracker' : 'No face in view', vx + vw / 2, vy + vh / 2);
   ctx.textAlign = 'start';
@@ -570,7 +570,7 @@ function drawFace(
   // The detection box.
   const pad = faceH * 0.06;
   brackets(ctx, x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad, Math.min(16, faceH * 0.1), `rgba(${CREAM}, 0.8)`, 1.5);
-  ctx.font = '600 10px "Instrument Sans", sans-serif';
+  ctx.font = '600 10px "Instrument Sans Variable", "Instrument Sans", sans-serif';
   ctx.fillStyle = `rgba(${CREAM}, 0.8)`;
   const tag = `FACE · ${FULL} POINTS`;
   ctx.fillText(tag, Math.max(ox + 8, x0 - pad), Math.max(oy + 14, y0 - pad - 6));
@@ -606,7 +606,7 @@ function brackets(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
 }
 
 function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, rgb: string) {
-  ctx.font = '600 11px "Instrument Sans", sans-serif';
+  ctx.font = '600 11px "Instrument Sans Variable", "Instrument Sans", sans-serif';
   const w = ctx.measureText(text).width + 12;
   ctx.fillStyle = `rgba(${rgb}, 0.9)`;
   ctx.beginPath();
