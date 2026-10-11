@@ -9,7 +9,7 @@ import { VENDOR_CONTENT_TYPES } from '../../apps/web/vendorAssets';
 import { normalizeRoomCode } from '@deadpan/shared';
 import { prewarm, serveLine, serveSfx } from './audio';
 import { allCannedLines } from './lines';
-import { listRounds, readRoundLog, roundAudioPath, roundFilePath } from './recorder';
+import { findRoundAudio, findRoundFile, listRounds, readRoundLog } from './recorder';
 import { createSocketServer, findRoom } from './rooms';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -49,10 +49,11 @@ app.get('/api/admin/rounds', (req, res) => {
 // would otherwise take "audio" for a room code and refuse it.
 app.get('/api/rounds/audio/:file', (req, res) => {
   const id = String(req.params.file).replace(/\.mp3$/, '');
-  if (!/^d[0-9a-f]{16}$/.test(id) || !existsSync(roundAudioPath(id))) return void res.status(404).end();
+  const file = /^d[0-9a-f]{16}$/.test(id) ? findRoundAudio(id) : null;
+  if (!file) return void res.status(404).end();
   // Each id is one recorded line that never changes, so browsers can keep it.
   res.type('audio/mpeg').setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-  res.sendFile(roundAudioPath(id));
+  res.sendFile(file);
 });
 // Round recordings for the evidence board and demo mode: the live round from memory (with
 // X-Round-Saved: 0 until it's complete), older ones from rounds/.
@@ -65,8 +66,8 @@ app.get('/api/rounds/:room/:round', (req, res) => {
     res.setHeader('X-Round-Saved', live.saved ? '1' : '0');
     return void res.json(live.file);
   }
-  const file = roundFilePath(code, round);
-  if (!existsSync(file)) return void res.status(404).json({ error: 'No recording of that round.' });
+  const file = findRoundFile(code, round);
+  if (!file) return void res.status(404).json({ error: 'No recording of that round.' });
   res.type('application/json').sendFile(file);
 });
 

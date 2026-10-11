@@ -2,6 +2,9 @@ import { makeRoomCode, MAX_PLAYERS, normalizeRoomCode, ROOM_CODE_LENGTH } from '
 import { useState } from 'react';
 import { Emblems, LockIcon, numberWord } from '../ui';
 
+/** The recorded round anyone can watch, committed in demo/ so it ships with every deploy. */
+const DEMO_ROUND = { room: 'JGWG', round: 1 };
+
 export function Landing() {
   const [code, setCode] = useState('');
   const valid = normalizeRoomCode(code);
@@ -10,7 +13,12 @@ export function Landing() {
     <div className="landing">
       <header className="site-bar">
         <span className="wordmark">DEADPAN</span>
-        <span className="site-bar-aside">A party game for up to {numberWord(MAX_PLAYERS)} players</span>
+        <span className="site-bar-right">
+          <span className="site-bar-aside">A party game for up to {numberWord(MAX_PLAYERS)} players</span>
+          <a className="btn outline site-bar-demo" href={`/host/${DEMO_ROUND.room}?demo=${DEMO_ROUND.round}&from=home`}>
+            Watch a recorded round
+          </a>
+        </span>
       </header>
 
       <main className="landing-main">

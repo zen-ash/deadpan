@@ -388,10 +388,28 @@ a {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
+.site-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
 .site-bar-aside {
   color: var(--ink-2);
   font-size: 14px;
   text-align: right;
+}
+
+.site-bar-demo {
+  min-height: 38px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
+@media (max-width: 640px) {
+  .site-bar-aside {
+    display: none;
+  }
 }
 
 .landing {

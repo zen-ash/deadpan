@@ -32,11 +32,12 @@ function Loading({ text }: { text: string }) {
 
 /**
  * Where a replay's way-back link goes, from its &from=: the live room it was opened from, the
- * admin page, or nowhere for a phone (it opened in a new tab next to the game).
+ * admin page, the landing page, or nowhere for a phone (it opened in a new tab next to the game).
  */
 function replayBack(code: string, from: string | null): { href: string; label: string } | null {
   if (from === 'phone') return null;
   if (from === 'admin') return { href: '/admin', label: 'Back to all rounds' };
+  if (from === 'home') return { href: '/', label: 'Back to start' };
   const room = normalizeRoomCode(from ?? '');
   return room ? { href: `/host/${room}`, label: `Back to room ${room}` } : { href: `/host/${code}`, label: 'Exit replay' };
 }

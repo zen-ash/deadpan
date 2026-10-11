@@ -25,5 +25,5 @@ rounds.jsonl
 # Test-only media for ?fake=1
 apps/web/public/test/
 
-# Round recordings (a chosen demo round gets committed in M6)
+# Round recordings. The demo round anyone can watch is committed in demo/ instead.
 rounds/

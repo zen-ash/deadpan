@@ -22,6 +22,11 @@ import type {
 import { dynamicAudio } from './audio';
 
 const DEFAULT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../rounds');
+/**
+ * Rounds committed to the repo for demo mode (the landing page links one). They ship with every
+ * deploy, unlike the rounds folder, and are only read, after the rounds folder.
+ */
+const DEMO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../demo');
 const MESH_EVERY_MS = 200;
 
 /** Read when used, not at import, so a ROUNDS_DIR from .env (loaded after imports) still applies. */
@@ -35,6 +40,24 @@ export function roundFilePath(room: string, round: number): string {
 
 export function roundAudioPath(id: string): string {
   return resolve(roundsDir(), 'audio', `${id}.mp3`);
+}
+
+/** A saved round's file: from the rounds folder, or else a committed demo round. */
+export function findRoundFile(room: string, round: number): string | null {
+  for (const dir of [roundsDir(), DEMO_DIR]) {
+    const file = resolve(dir, `${room}-${round}.json`);
+    if (existsSync(file)) return file;
+  }
+  return null;
+}
+
+/** A recorded Gemini line, from the rounds folder or a committed demo round. */
+export function findRoundAudio(id: string): string | null {
+  for (const dir of [roundsDir(), DEMO_DIR]) {
+    const file = resolve(dir, 'audio', `${id}.mp3`);
+    if (existsSync(file)) return file;
+  }
+  return null;
 }
 
 /** Every finished round, one JSON line each, for the accuracy stat. */
@@ -73,16 +96,19 @@ export function readRoundLog(): RoundLogEntry[] {
  * after its room was cleared never overwrites an older recording.
  */
 export function lastSavedRound(room: string): number {
-  try {
-    let last = 0;
-    for (const file of readdirSync(roundsDir())) {
-      const m = file.match(/^([A-Z]{4})-(\d+)\.json$/);
-      if (m?.[1] === room) last = Math.max(last, Number(m[2]));
+  let last = 0;
+  // A demo round's code counts too, so a live room that happens to share it can't shadow it.
+  for (const dir of [roundsDir(), DEMO_DIR]) {
+    try {
+      for (const file of readdirSync(dir)) {
+        const m = file.match(/^([A-Z]{4})-(\d+)\.json$/);
+        if (m?.[1] === room) last = Math.max(last, Number(m[2]));
+      }
+    } catch {
+      // No such folder yet.
     }
-    return last;
-  } catch {
-    return 0;
   }
+  return last;
 }
 
 /** Round files already read for the list, by name, until they change. */
