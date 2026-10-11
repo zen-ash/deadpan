@@ -27,7 +27,7 @@ import type { WebSocket } from 'ws';
 import { canned, dynamic, sfxMs, type Line } from './audio';
 import * as detective from './detective';
 import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, HMM, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
-import { lastSavedRound, RoundRecorder } from './recorder';
+import { lastSavedRound, logRound, RoundRecorder } from './recorder';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
 import { answerMetrics, buildBaseline, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
 import { scribeUrl } from './scribe';
@@ -115,10 +115,42 @@ export class ImposterGame {
     if (this.phase === 'verdict' && this.verdict) send(ws, { t: 'verdict', ...this.verdict });
   }
 
+  /** Catches up a big screen, including the answers so far, so its cards fill in after a reconnect. */
+  syncHost(ws: WebSocket) {
+    this.syncTo(ws);
+    if (this.phase !== 'lobby') for (const answer of this.answers) send(ws, { t: 'answer', ...answer });
+  }
+
+  /** Whether this player is in the round being played. */
+  isPlaying(playerId: string): boolean {
+    return this.phase !== 'lobby' && this.roundPlayers.includes(playerId);
+  }
+
+  /**
+   * A phone came back after dropping out (or reloading): its secret again, and its turn if the
+   * detective is on it. Scribe only restarts while the question plays, so no answer words are lost.
+   */
+  onPlayerBack(player: Player) {
+    if (!this.isPlaying(player.id)) return;
+    if (this.word && this.imposterId) send(player.ws, { t: 'secret', word: player.id === this.imposterId ? null : this.word });
+    const turn = this.turn;
+    if (!turn || turn.info.playerId !== player.id) return;
+    if (turn.info.stage === 'answering') {
+      send(player.ws, { t: 'your_turn', turnId: turn.info.id, questionEnd: turn.info.questionEnd! });
+    } else if (turn.info.stage === 'asking') {
+      void scribeUrl().then((url) => {
+        if (!url || this.turn !== turn || turn.info.stage !== 'asking') return;
+        turn.scribe = true;
+        send(player.ws, { t: 'scribe', turnId: turn.info.id, url });
+      });
+    }
+  }
+
   /** Starts a round with everyone in the room. Returns an error message if it can't. */
   start(): string | null {
     if (this.phase !== 'lobby' && this.phase !== 'verdict') return 'A round is already running.';
-    const players = [...this.room.players.values()];
+    // A phone that's mid-reconnect sits this one out.
+    const players = [...this.room.players.values()].filter((p) => p.online);
     if (players.length === 0) return 'Nobody has joined yet.';
 
     this.cancelRun();
@@ -228,18 +260,22 @@ export class ImposterGame {
     return ranked[0] ? { playerId: ranked[0], line: canned(pick(FOLLOWUP_FALLBACKS)) } : null;
   }
 
-  /** Drumroll while Gemini decides (SPEC: the verdict call starts at the drumroll), then the reveal. */
+  /**
+   * Gemini decides while the detective says he's heard enough and the drumroll plays (the call
+   * starts before the line, not at the drumroll, so a slow answer rarely adds silence), then the reveal.
+   */
   private async decide(run: Run) {
     const live = () => this.run === run && !run.aborted;
     this.verdictStage = 'deliberating';
     this.setPhase('verdict');
+    const players = this.roundPlayers.map((id) => ({ id, name: this.name(id) }));
+    const local = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
+    const deciding = detective.verdict(this.context(), local.scores);
     await this.say(run, canned(HEARD_ENOUGH));
     if (!live()) return;
 
     this.sfx('drumroll');
-    const players = this.roundPlayers.map((id) => ({ id, name: this.name(id) }));
-    const local = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
-    const [fromGemini] = await Promise.all([detective.verdict(this.context(), local.scores), this.sleep(run, sfxMs('drumroll'))]);
+    const [fromGemini] = await Promise.all([deciding, this.sleep(run, sfxMs('drumroll'))]);
     if (!live()) return;
 
     let verdict: Verdict;
@@ -277,6 +313,18 @@ export class ImposterGame {
     if (verdict.correct && live()) this.sfx('caseclosed');
     const saved = this.recorder?.save();
     if (saved) this.log(`round saved to ${saved}`);
+    logRound({
+      at: Date.now(),
+      room: this.room.code,
+      round: verdict.round,
+      players: verdict.scores.length,
+      word: verdict.word,
+      imposter: this.name(verdict.imposterId),
+      accused: this.name(verdict.accusedId),
+      correct: verdict.correct,
+      source: verdict.source,
+      confidence: verdict.confidence,
+    });
     this.log(
       `verdict (${verdict.source}): accused ${this.name(verdict.accusedId)}, imposter was ${this.name(verdict.imposterId)}, ` +
         `word "${verdict.word}" (${verdict.correct ? 'caught' : 'missed'})`,
@@ -308,6 +356,12 @@ export class ImposterGame {
   private async playTurn(run: Run, planned: PlannedTurn): Promise<void> {
     const player = this.room.players.get(planned.playerId);
     if (!player || !this.roundPlayers.includes(planned.playerId)) return;
+    // Nobody to answer: skip the question rather than time out on a dropped phone.
+    if (!player.online) {
+      this.log(`skipped ${player.name}'s ${planned.kind} turn (disconnected)`);
+      planned.onAnswerEnd?.();
+      return;
+    }
 
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => (settle = resolve));

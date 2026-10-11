@@ -65,6 +65,8 @@ export interface PlayerInfo {
   slot: number;
   cam: boolean;
   mic: boolean;
+  /** False while the phone is disconnected; it keeps its place for a while in case it comes back. */
+  online: boolean;
 }
 
 export interface FaceFeatures {
@@ -243,7 +245,8 @@ export interface Verdict {
 }
 
 export type ClientToServer =
-  | { t: 'join'; room: string; name: string }
+  // `resume` (from an earlier welcome) takes back the same player after a dropped connection or a reload.
+  | { t: 'join'; room: string; name: string; resume?: { id: string; token: string } }
   | { t: 'status'; cam: boolean; mic: boolean }
   | { t: 'diag'; msg: string }
   | { t: 'ping'; c: number }
@@ -267,7 +270,8 @@ export type HostToServer =
 export type ErrorCode = 'bad_room' | 'bad_name' | 'room_full' | 'bad_message' | 'not_ready';
 
 export type ServerToClient =
-  | { t: 'welcome'; room: string; playerId: string | null }
+  // Players also get a resume token, kept for the rest of the session.
+  | { t: 'welcome'; room: string; playerId: string | null; resume?: string }
   | { t: 'room'; room: string; players: PlayerInfo[] }
   | { t: 'error'; code: ErrorCode; message: string }
   | { t: 'pong'; c: number; s: number }
@@ -299,7 +303,7 @@ export type ServerToClient =
  */
 export type RoundSample = [number, number, number, number, number, number, number, number, number, number, number, number, number?, number?];
 
-/** A saved round that demo mode can play back, for the big screen's "Past rounds" list. */
+/** A saved round, for the "Past rounds" lists. */
 export interface RoundSummary {
   room: string;
   round: number;
@@ -309,6 +313,28 @@ export interface RoundSummary {
   word: string | null;
   /** Whether the detective caught the imposter; null without a verdict. */
   caught: boolean | null;
+  /** Recorded with demo mode's event log, so it can be played back (not just shown as evidence). */
+  replayable: boolean;
+}
+
+/** One line of rounds.jsonl: how a finished round went, for the accuracy stat. */
+export interface RoundLogEntry {
+  at: number;
+  room: string;
+  round: number;
+  players: number;
+  word: string;
+  imposter: string;
+  accused: string;
+  correct: boolean;
+  source: 'local' | 'gemini';
+  confidence: number | null;
+}
+
+/** The private all-rounds page: every saved round, and the accuracy log. */
+export interface AdminRounds {
+  rounds: RoundSummary[];
+  log: RoundLogEntry[];
 }
 
 /** The game messages the big screen got during the round, which demo mode plays back in time. */

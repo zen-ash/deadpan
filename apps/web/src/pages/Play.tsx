@@ -19,6 +19,31 @@ interface Health {
 type FaceState = 'loading' | 'found' | 'lost' | 'failed';
 
 const NAME_KEY = 'deadpan:name';
+/** Mic levels of exactly zero for this many 1 s checks in a row: the track went silent (an iOS bug). */
+const SILENT_CHECKS = 5;
+
+interface Resume {
+  id: string;
+  token: string;
+}
+
+/** The resume token for this room, kept per tab so a reload takes back the same seat. */
+function loadResume(code: string): Resume | null {
+  try {
+    const raw = sessionStorage.getItem(`deadpan:resume:${code}`);
+    return raw ? (JSON.parse(raw) as Resume) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveResume(code: string, resume: Resume) {
+  try {
+    sessionStorage.setItem(`deadpan:resume:${code}`, JSON.stringify(resume));
+  } catch {
+    // Private mode: a reload just joins as a new player.
+  }
+}
 
 function loadName(): string {
   try {
@@ -49,6 +74,8 @@ export function Play({ code }: { code: string }) {
   const turnsRef = useRef<TurnController | null>(null);
   /** The big screen's camera view is open, so full landmark frames go out too. */
   const cameraViewRef = useRef(false);
+  /** Sent with every join, so a dropped connection or a reload comes back as the same player. */
+  const resumeRef = useRef<Resume | null>(loadResume(code));
 
   const [name, setName] = useState(loadName);
   const [stage, setStage] = useState<Stage>('setup');
@@ -61,6 +88,8 @@ export function Play({ code }: { code: string }) {
   const [health, setHealth] = useState<Health>(healthRef.current);
   // iOS can pause the AudioContext when capture starts; the mic track still looks fine.
   const [audioAsleep, setAudioAsleep] = useState(false);
+  /** The mic track looks fine but only delivers silence. */
+  const [micSilent, setMicSilent] = useState(false);
   const [signals, setSignals] = useState<PhoneSignals | null>(null);
   const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') === '1');
   /** During a round only the health dot shows; tapping it shows the details. */
@@ -85,7 +114,7 @@ export function Play({ code }: { code: string }) {
       onOpen: () => {
         const joinName = joinNameRef.current;
         if (!joinName) return;
-        socket.send({ t: 'join', room: code, name: joinName });
+        socket.send({ t: 'join', room: code, name: joinName, resume: resumeRef.current ?? undefined });
         socket.send({ t: 'status', ...healthRef.current });
       },
       onConnectedChange: (isConnected) => {
@@ -97,6 +126,10 @@ export function Play({ code }: { code: string }) {
           case 'welcome':
             setPlayerId(msg.playerId);
             setServerError('');
+            if (msg.playerId && msg.resume) {
+              resumeRef.current = { id: msg.playerId, token: msg.resume };
+              saveResume(code, resumeRef.current);
+            }
             break;
           case 'room':
             for (const p of msg.players) knownNames.current.set(p.id, p.name);
@@ -210,11 +243,16 @@ export function Play({ code }: { code: string }) {
     const { audioCtx, analyser } = media;
     const tracks = [media.stream.getVideoTracks()[0], media.stream.getAudioTracks()[0]];
 
+    // A live mic is never exactly silent; a run of all-zero frames means the track died quietly.
+    const silenceBuffer = new Float32Array(analyser.fftSize);
+    let zeroChecks = 0;
+    let silent = false;
     const update = () => {
       const audioRunning = audioCtx.state === 'running';
       setAudioAsleep(!audioRunning);
+      setMicSilent(silent);
       // The mic only counts as working if the audio we analyse is actually flowing.
-      const next = { cam: trackOk(tracks[0]), mic: trackOk(tracks[1]) && audioRunning };
+      const next = { cam: trackOk(tracks[0]), mic: trackOk(tracks[1]) && audioRunning && !silent };
       const prev = healthRef.current;
       if (next.cam === prev.cam && next.mic === prev.mic) return;
       healthRef.current = next;
@@ -226,7 +264,17 @@ export function Play({ code }: { code: string }) {
       for (const type of ['mute', 'unmute', 'ended']) track?.addEventListener(type, update);
     }
     audioCtx.addEventListener('statechange', update);
-    const poll = setInterval(update, 1000);
+    const poll = setInterval(() => {
+      // A hidden page or a paused context isn't a silent mic.
+      if (document.visibilityState === 'visible' && audioCtx.state === 'running' && trackOk(tracks[1])) {
+        zeroChecks = micLevel(analyser, silenceBuffer) === 0 ? zeroChecks + 1 : 0;
+        if (zeroChecks === SILENT_CHECKS) socketRef.current?.send({ t: 'diag', msg: 'mic delivers only silence' });
+      } else {
+        zeroChecks = 0;
+      }
+      silent = zeroChecks >= SILENT_CHECKS;
+      update();
+    }, 1000);
 
     setAnalyser(analyser);
     const buffer = new Float32Array(analyser.fftSize);
@@ -281,7 +329,7 @@ export function Play({ code }: { code: string }) {
     const joinNow = () => {
       if (joinNameRef.current) return;
       joinNameRef.current = trimmed;
-      socketRef.current?.send({ t: 'join', room: code, name: trimmed });
+      socketRef.current?.send({ t: 'join', room: code, name: trimmed, resume: resumeRef.current ?? undefined });
     };
     pending.then(
       (media) => {
@@ -341,8 +389,9 @@ export function Play({ code }: { code: string }) {
     <>
       {audioAsleep && health.cam && <p className="banner warn">Tap anywhere on the screen to start the mic.</p>}
       {(!health.cam || (!health.mic && !audioAsleep)) && (
+        // A reload keeps this player's seat (the resume token survives it).
         <button className="btn black stuck" onClick={() => location.reload()}>
-          Camera or mic stopped. Reload
+          {micSilent && health.cam ? 'Your mic went silent. Reload' : 'Camera or mic stopped. Reload'}
         </button>
       )}
     </>

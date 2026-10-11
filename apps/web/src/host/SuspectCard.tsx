@@ -10,7 +10,7 @@ export type CardMoment = 'lobby' | 'calibrating' | 'questioning' | 'verdict' | '
 
 interface CardProps {
   player: PlayerInfo;
-  /** lobby: name and pulse; full: every signal; compact: the key ones, for 5–6 players. */
+  /** lobby: name and pulse; full: every signal; compact: the key ones, for 5–6 players; nametag: the name, on a phone. */
   variant: CardVariant;
   moment: CardMoment;
   /** Latest drift during the round, the round's mean once revealed. */
@@ -70,7 +70,9 @@ function Status({ player, live, moment, active, benched, drift }: Pick<CardProps
   }
   let tone = '';
   let text: string;
-  if (live.stale) [tone, text] = ['bad', 'No signal'];
+  // The server keeps a dropped phone's seat for a while; it shows here until it's back or gone.
+  if (!player.online) [tone, text] = ['warn', 'Reconnecting'];
+  else if (live.stale) [tone, text] = ['bad', 'No signal'];
   else if (!player.cam || !player.mic) [tone, text] = ['warn', 'Check phone'];
   else if (moment === 'lobby') text = 'Ready';
   else if (!live.features?.face.present) [tone, text] = ['warn', 'Face lost'];
@@ -134,7 +136,9 @@ export function SuspectCard({ player, variant, moment, drift, lastAnswer, active
 
   return (
     <article className={`suspect-card ${variant} ${active ? 'active' : ''} ${stamp ? 'accused' : ''}`}>
-      {stamp && <span className={`card-stamp ${stamp}`}>{stamp === 'caught' ? 'Caught' : stamp === 'accused' ? 'Accused' : 'Escaped'}</span>}
+      {stamp && variant !== 'nametag' && (
+        <span className={`card-stamp ${stamp}`}>{stamp === 'caught' ? 'Caught' : stamp === 'accused' ? 'Accused' : 'Escaped'}</span>
+      )}
       {head}
 
       {variant === 'full' && (
@@ -179,6 +183,7 @@ export function SuspectCard({ player, variant, moment, drift, lastAnswer, active
       )}
 
       {variant === 'lobby' && foot}
+      {variant === 'nametag' && stamp && <span className={`nametag-stamp ${stamp}`}>{stamp === 'caught' ? 'Caught' : stamp === 'accused' ? 'Accused' : 'Escaped'}</span>}
     </article>
   );
 }

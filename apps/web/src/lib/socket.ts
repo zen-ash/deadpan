@@ -5,6 +5,11 @@ import { ClockSync } from './clock';
 const BURST_PINGS = 5;
 const BURST_GAP_MS = 150;
 const PING_EVERY_MS = 2000;
+/**
+ * No pong for this long means the connection is dead even if the browser hasn't noticed (phones
+ * switching networks or waking up), so reconnect instead of waiting for it to time out.
+ */
+const PONG_TIMEOUT_MS = 7000;
 
 export interface SocketHandlers {
   /** Runs after every connect and reconnect, so (re)send join messages here. */
@@ -30,6 +35,7 @@ export class RoomSocket implements Link {
   private retries = 0;
   private retryTimer: number | undefined;
   private pingTimer: number | undefined;
+  private lastPongAt = 0;
 
   constructor(private readonly handlers: SocketHandlers) {
     this.connect();
@@ -43,6 +49,7 @@ export class RoomSocket implements Link {
 
     ws.onopen = () => {
       this.retries = 0;
+      this.lastPongAt = Date.now();
       this.startPinging();
       this.handlers.onConnectedChange?.(true);
       this.handlers.onOpen?.();
@@ -60,24 +67,40 @@ export class RoomSocket implements Link {
       } catch {
         return;
       }
-      if (msg.t === 'pong') this.clock.onPong(msg.c, msg.s);
+      if (msg.t === 'pong') {
+        this.lastPongAt = Date.now();
+        this.clock.onPong(msg.c, msg.s);
+      }
       this.handlers.onMessage(msg);
     };
     ws.onclose = () => {
       // A closed RoomSocket stays silent. Otherwise its late close (React dev mode opens and
       // closes one right away) would mark its replacement's screen as disconnected.
       if (this.stopped || this.ws !== ws) return;
-      clearTimeout(this.pingTimer);
-      this.handlers.onConnectedChange?.(false);
-      const delay = Math.min(5000, 400 * 2 ** this.retries++);
-      this.retryTimer = window.setTimeout(() => this.connect(), delay);
+      this.reconnect();
     };
+  }
+
+  private reconnect() {
+    clearTimeout(this.pingTimer);
+    clearTimeout(this.retryTimer);
+    this.handlers.onConnectedChange?.(false);
+    const delay = Math.min(5000, 400 * 2 ** this.retries++);
+    this.retryTimer = window.setTimeout(() => this.connect(), delay);
   }
 
   private startPinging() {
     clearTimeout(this.pingTimer);
     let sent = 0;
     const ping = () => {
+      const ws = this.ws;
+      if (ws?.readyState === WebSocket.OPEN && Date.now() - this.lastPongAt > PONG_TIMEOUT_MS) {
+        // Drop the dead socket without waiting for its close handshake; its late close is ignored.
+        this.ws = null;
+        ws.close();
+        this.reconnect();
+        return;
+      }
       this.send({ t: 'ping', c: Date.now() });
       sent++;
       this.pingTimer = window.setTimeout(ping, sent < BURST_PINGS ? BURST_GAP_MS : PING_EVERY_MS);

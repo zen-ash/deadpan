@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, resolve, sep } from 'node:path';
@@ -8,7 +9,7 @@ import { VENDOR_CONTENT_TYPES } from '../../apps/web/vendorAssets';
 import { normalizeRoomCode } from '@deadpan/shared';
 import { prewarm, serveLine, serveSfx } from './audio';
 import { allCannedLines } from './lines';
-import { listRounds, roundAudioPath, roundFilePath } from './recorder';
+import { listRounds, readRoundLog, roundAudioPath, roundFilePath } from './recorder';
 import { createSocketServer, findRoom } from './rooms';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -27,9 +28,22 @@ app.get('/healthz', (_req, res) => {
 // The detective's lines and sound effects, played by the big screen.
 app.get('/api/line/:file', (req, res) => void serveLine(req, res));
 app.get('/api/sfx/:file', serveSfx);
-// Saved rounds that demo mode can play back, for the big screen's "Past rounds" list.
-app.get('/api/rounds', (_req, res) => {
-  res.json(listRounds().slice(0, 50));
+// One room's saved rounds, for its big screen's "Past rounds" list. Nobody can list other rooms.
+app.get('/api/rounds', (req, res) => {
+  const code = normalizeRoomCode(String(req.query.room ?? ''));
+  if (!code) return void res.status(400).json({ error: 'Which room?' });
+  res.json(listRounds(code).slice(0, 50));
+});
+// Every room's rounds and the accuracy log, for the owner's /admin page only.
+app.get('/api/admin/rounds', (req, res) => {
+  const key = process.env.ADMIN_KEY;
+  if (!key) return void res.status(503).json({ error: 'ADMIN_KEY is not set on the server.' });
+  const given = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
+  // Hashing first gives equal lengths, so the comparison takes the same time whatever was sent.
+  const digest = (v: string) => createHash('sha256').update(v).digest();
+  if (!timingSafeEqual(digest(given), digest(key))) return void res.status(401).json({ error: 'Wrong key.' });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ rounds: listRounds(), log: readRoundLog() });
 });
 // Round recordings for the evidence board and demo mode: the live round from memory (with
 // X-Round-Saved: 0 until it's complete), older ones from rounds/.

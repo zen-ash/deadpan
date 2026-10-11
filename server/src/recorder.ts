@@ -1,7 +1,8 @@
 // Records one round in memory and writes it to rounds/<room>-<round>.json when it ends (SPEC:
 // no database). The evidence board and demo mode read these files. Gemini's dynamic voice lines
 // are copied next to them, so a replay can play them after the in-memory audio has expired.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+// ROUNDS_DIR moves the folder, e.g. onto Render's persistent disk so rounds survive deploys.
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -9,6 +10,7 @@ import type {
   FeaturesPacket,
   RoundEvent,
   RoundFile,
+  RoundLogEntry,
   RoundSample,
   RoundSummary,
   SfxName,
@@ -19,15 +21,51 @@ import type {
 } from '@deadpan/shared';
 import { dynamicAudio } from './audio';
 
-export const ROUNDS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../rounds');
+const DEFAULT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../rounds');
 const MESH_EVERY_MS = 200;
 
+/** Read when used, not at import, so a ROUNDS_DIR from .env (loaded after imports) still applies. */
+export function roundsDir(): string {
+  return process.env.ROUNDS_DIR ? resolve(process.env.ROUNDS_DIR) : DEFAULT_DIR;
+}
+
 export function roundFilePath(room: string, round: number): string {
-  return resolve(ROUNDS_DIR, `${room}-${round}.json`);
+  return resolve(roundsDir(), `${room}-${round}.json`);
 }
 
 export function roundAudioPath(id: string): string {
-  return resolve(ROUNDS_DIR, 'audio', `${id}.mp3`);
+  return resolve(roundsDir(), 'audio', `${id}.mp3`);
+}
+
+/** Every finished round, one JSON line each, for the accuracy stat. */
+function roundLogPath(): string {
+  return resolve(roundsDir(), 'rounds.jsonl');
+}
+
+export function logRound(entry: RoundLogEntry) {
+  try {
+    mkdirSync(roundsDir(), { recursive: true });
+    appendFileSync(roundLogPath(), `${JSON.stringify(entry)}\n`);
+  } catch (err) {
+    console.warn('[rounds] could not log the round:', err instanceof Error ? err.message : err);
+  }
+}
+
+export function readRoundLog(): RoundLogEntry[] {
+  try {
+    return readFileSync(roundLogPath(), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as RoundLogEntry];
+        } catch {
+          return [];
+        }
+      });
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -37,7 +75,7 @@ export function roundAudioPath(id: string): string {
 export function lastSavedRound(room: string): number {
   try {
     let last = 0;
-    for (const file of readdirSync(ROUNDS_DIR)) {
+    for (const file of readdirSync(roundsDir())) {
       const m = file.match(/^([A-Z]{4})-(\d+)\.json$/);
       if (m?.[1] === room) last = Math.max(last, Number(m[2]));
     }
@@ -50,17 +88,17 @@ export function lastSavedRound(room: string): number {
 /** Round files already read for the list, by name, until they change. */
 const summaries = new Map<string, { mtimeMs: number; summary: RoundSummary | null }>();
 
-/** Saved rounds that demo mode can play back, newest first. Each file is read once. */
-export function listRounds(): RoundSummary[] {
+/** Saved rounds, newest first: one room's, or every room's. Each file is read once. */
+export function listRounds(room?: string): RoundSummary[] {
   let files: string[];
   try {
-    files = readdirSync(ROUNDS_DIR).filter((f) => /^[A-Z]{4}-\d+\.json$/.test(f));
+    files = readdirSync(roundsDir()).filter((f) => /^[A-Z]{4}-\d+\.json$/.test(f) && (!room || f.startsWith(`${room}-`)));
   } catch {
     return [];
   }
   const out: RoundSummary[] = [];
   for (const file of files) {
-    const path = resolve(ROUNDS_DIR, file);
+    const path = resolve(roundsDir(), file);
     let mtimeMs: number;
     try {
       mtimeMs = statSync(path).mtimeMs;
@@ -77,11 +115,10 @@ export function listRounds(): RoundSummary[] {
   return out.sort((a, b) => b.startedAt - a.startedAt);
 }
 
-/** The list entry for a round file, or null if it can't be played back (recorded before demo mode). */
+/** The list entry for a round file, or null if it can't be read. */
 function summarize(path: string): RoundSummary | null {
   try {
     const r = JSON.parse(readFileSync(path, 'utf8')) as RoundFile;
-    if (!r.events?.length) return null;
     return {
       room: r.room,
       round: r.round,
@@ -90,6 +127,7 @@ function summarize(path: string): RoundSummary | null {
       players: r.players.map((p) => p.name),
       word: r.word,
       caught: r.verdict ? r.verdict.correct : null,
+      replayable: !!r.events?.length,
     };
   } catch {
     return null;
@@ -225,7 +263,7 @@ export class RoundRecorder {
     this.closed = true;
     this.data.endedAt = Date.now();
     try {
-      mkdirSync(resolve(ROUNDS_DIR, 'audio'), { recursive: true });
+      mkdirSync(resolve(roundsDir(), 'audio'), { recursive: true });
       const spoken = this.data.events!.flatMap(([, e]) => (e.t === 'say' ? [e.line] : []));
       for (const line of [...this.data.lines, ...spoken]) {
         const base = line.id.split('~')[0]!;

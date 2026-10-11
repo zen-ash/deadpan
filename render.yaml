@@ -18,3 +18,14 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID
         sync: false
+      # Opens /admin. Set it in the dashboard: an existing Blueprint ignores new sync: false keys.
+      - key: ADMIN_KEY
+        sync: false
+      # Recordings and rounds.jsonl live on the disk below, so they survive deploys.
+      - key: ROUNDS_DIR
+        value: /var/data/rounds
+    # With a disk, each deploy has a short downtime and the service stays at one instance.
+    disk:
+      name: deadpan-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -2,7 +2,8 @@
 // free area: right of the join panel and under "The lineup." in the lobby; below the detective's
 // line (measured from the page) during a round. The 3D faces and the DOM cards read the same slots.
 
-export type CardVariant = 'lobby' | 'full' | 'compact';
+/** nametag: just the name, under the face, on a phone-sized screen (a replay opened from a phone). */
+export type CardVariant = 'lobby' | 'full' | 'compact' | 'nametag';
 
 export interface Area {
   x: number;
@@ -31,7 +32,11 @@ export const CARD_SIZE: Record<CardVariant, { w: number; h: number }> = {
   lobby: { w: 270, h: 112 },
   full: { w: 320, h: 340 },
   compact: { w: 300, h: 232 },
+  nametag: { w: 150, h: 58 },
 };
+
+/** Below this width (a phone) the screen gets the narrow layout: faces in a grid with name tags. */
+export const NARROW_W = 560;
 
 /** Face width over height, for the meshes. */
 const FACE_ASPECT = 0.8;
@@ -49,8 +54,9 @@ const CARD_SHARE = 0.68;
  * rows (3 + 3 or 3 + 2) with compact cards beside the faces so both rows fit. The lobby is
  * narrower (the join panel takes the left) but its cards are short, so it goes to two rows from 4.
  */
-export function layoutSuspects(n: number, area: Area, inRound: boolean, viewportH: number): Slot[] {
+export function layoutSuspects(n: number, area: Area, inRound: boolean, viewportH: number, narrow = false): Slot[] {
   if (n <= 0 || area.w <= 0 || area.h <= 0) return [];
+  if (narrow) return layoutNarrow(n, area, viewportH);
   const twoRows = n >= (inRound ? 5 : 4);
   const rows = twoRows ? [Math.ceil(n / 2), Math.floor(n / 2)] : [n];
   const perRow = rows[0]!;
@@ -108,6 +114,38 @@ export function layoutSuspects(n: number, area: Area, inRound: boolean, viewport
       }
     }
   });
+  return slots;
+}
+
+/** A phone-sized screen: up to 3 faces a row, each with its name tag under it, centred in the area. */
+function layoutNarrow(n: number, area: Area, viewportH: number): Slot[] {
+  const cols = Math.min(n, 3);
+  const rows = Math.ceil(n / cols);
+  const slotW = area.w / cols;
+  const tag = CARD_SIZE.nametag;
+  const scale = Math.min(1, (slotW - 8) / tag.w);
+  const rowH = (area.h - (rows - 1) * GAP) / rows;
+  const faceH = Math.max(40, Math.min(rowH - tag.h * scale - 8, (slotW * 0.72) / FACE_ASPECT, viewportH * 0.3));
+  const blockH = faceH + 8 + tag.h * scale;
+  const top = area.y + Math.max(0, (area.h - (rows * blockH + (rows - 1) * GAP)) / 2);
+  const slots: Slot[] = [];
+  for (let r = 0; r < rows; r++) {
+    const count = Math.min(cols, n - r * cols);
+    const left = area.x + (area.w - count * slotW) / 2;
+    for (let i = 0; i < count; i++) {
+      const faceX = left + i * slotW + slotW / 2;
+      const rowTop = top + r * (blockH + GAP);
+      slots.push({
+        faceX,
+        faceY: rowTop + faceH / 2,
+        faceH,
+        cardX: faceX - (tag.w * scale) / 2,
+        cardY: rowTop + faceH + 8,
+        cardScale: scale,
+        variant: 'nametag',
+      });
+    }
+  }
   return slots;
 }
 

@@ -20,7 +20,12 @@ export interface SpeechEvent {
 }
 
 export interface Player extends PlayerInfo {
+  /** The phone's current socket; replaced when it reconnects. */
   ws: WebSocket;
+  /** Proves a reconnecting phone is this player. */
+  resumeToken: string;
+  /** Removes the player if their phone doesn't come back in time. */
+  graceTimer?: NodeJS.Timeout;
   /** Latest 10 Hz features from the phone. */
   features: FeaturesPacket | null;
   samples: Sample[];

@@ -87,7 +87,7 @@ export class DemoSocket implements Link {
       }));
       this.handlers.onConnectedChange?.(true);
       this.emit({ t: 'welcome', room: this.room, playerId: null });
-      this.emit({ t: 'room', room: this.room, players: file.players.map((p) => ({ ...p, cam: true, mic: true })) });
+      this.emit({ t: 'room', room: this.room, players: file.players.map((p) => ({ ...p, cam: true, mic: true, online: true })) });
       this.toLobby();
     } catch (err) {
       if (this.stopped) return;

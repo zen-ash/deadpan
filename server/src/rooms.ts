@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
@@ -26,6 +26,12 @@ type Conn =
   | { role: 'player'; room: Room; player: Player };
 
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
+/**
+ * How long a disconnected phone keeps its place before it counts as gone. Longer in a round, where
+ * leaving costs the player their seat (and the imposter leaving ends the round).
+ */
+const LOBBY_GRACE_MS = 10_000;
+const ROUND_GRACE_MS = 45_000;
 const HEARTBEAT_MS = 15_000;
 const MESH_BYTES = (MESH_HEADER + MESH_POINTS.length * 3) * 2;
 const FULL_BYTES = (MESH_HEADER + FACE_LANDMARK_COUNT * 3) * 2;
@@ -75,7 +81,7 @@ function broadcastRoom(room: Room) {
   broadcast(room, {
     t: 'room',
     room: room.code,
-    players: [...room.players.values()].map(({ id, name, slot, cam, mic }) => ({ id, name, slot, cam, mic })),
+    players: [...room.players.values()].map(({ id, name, slot, cam, mic, online }) => ({ id, name, slot, cam, mic, online })),
   });
 }
 
@@ -88,6 +94,45 @@ function setCameraView(room: Room, ws: WebSocket, on: boolean) {
   if (now === was) return;
   console.log(`[room ${room.code}] camera view ${now ? 'opened' : 'closed'}`);
   for (const p of room.players.values()) send(p.ws, { t: 'camera_view', on: now });
+}
+
+/** The player a reconnecting phone's resume token belongs to, if it's still in the room. */
+function resumable(room: Room, resume: unknown): Player | null {
+  if (!resume || typeof resume !== 'object') return null;
+  const { id, token } = resume as Record<string, unknown>;
+  if (typeof id !== 'string' || typeof token !== 'string') return null;
+  const player = room.players.get(id);
+  if (!player) return null;
+  const a = Buffer.from(player.resumeToken);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b) ? player : null;
+}
+
+/** Puts a returning phone back in its seat, on its new socket. */
+function reattach(room: Room, player: Player, ws: WebSocket) {
+  clearTimeout(player.graceTimer);
+  player.graceTimer = undefined;
+  const old = player.ws;
+  player.ws = ws;
+  player.online = true;
+  // The old socket may still look open (a half-dead connection). Its close is ignored from now on.
+  if (old !== ws && old.readyState === old.OPEN) old.close(4000, 'Replaced by a new connection');
+  console.log(`[room ${room.code}] ${player.name} reconnected`);
+  send(ws, { t: 'welcome', room: room.code, playerId: player.id, resume: player.resumeToken });
+  broadcastRoom(room);
+  room.game.syncTo(ws);
+  room.game.onPlayerBack(player);
+  send(ws, { t: 'camera_view', on: room.cameraHosts.size > 0 });
+}
+
+function removePlayer(room: Room, player: Player) {
+  clearTimeout(player.graceTimer);
+  if (room.players.get(player.id) !== player) return;
+  room.players.delete(player.id);
+  console.log(`[room ${room.code}] ${player.name} left`);
+  room.game.onPlayerLeft(player.id);
+  broadcastRoom(room);
+  scheduleCleanup(room);
 }
 
 function freeSlot(room: Room): number {
@@ -179,17 +224,26 @@ function uniqueName(room: Room, raw: string): string {
   }
 }
 
-function leave(conn: Conn, ws: WebSocket) {
+/**
+ * A socket stops being a host or player: it switched roles, or (`dropped`) it closed. A dropped
+ * phone keeps its seat for a grace period, so it can reconnect into the same round.
+ */
+function leave(conn: Conn, ws: WebSocket, dropped = false) {
   if (conn.role === 'host') {
     conn.room.hosts.delete(ws);
     setCameraView(conn.room, ws, false);
     scheduleCleanup(conn.room);
   } else if (conn.role === 'player') {
-    conn.room.players.delete(conn.player.id);
-    console.log(`[room ${conn.room.code}] ${conn.player.name} left`);
-    conn.room.game.onPlayerLeft(conn.player.id);
-    broadcastRoom(conn.room);
-    scheduleCleanup(conn.room);
+    const { room, player } = conn;
+    // A replaced socket closing late doesn't touch the phone that reconnected.
+    if (player.ws !== ws) return;
+    if (!dropped) return removePlayer(room, player);
+    player.online = false;
+    console.log(`[room ${room.code}] ${player.name} disconnected`);
+    broadcastRoom(room);
+    clearTimeout(player.graceTimer);
+    const grace = room.game.isPlaying(player.id) ? ROUND_GRACE_MS : LOBBY_GRACE_MS;
+    player.graceTimer = setTimeout(() => removePlayer(room, player), grace);
   }
 }
 
@@ -210,7 +264,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       room.hosts.add(ws);
       send(ws, { t: 'welcome', room: code, playerId: null });
       broadcastRoom(room);
-      room.game.syncTo(ws);
+      room.game.syncHost(ws);
       return { role: 'host', room };
     }
 
@@ -224,8 +278,14 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
         sendError(ws, 'bad_name', 'Enter a name first.');
         return conn;
       }
-      leave(conn, ws);
       const room = getRoom(code);
+      const returning = resumable(room, msg.resume);
+      if (returning) {
+        if (!(conn.role === 'player' && conn.player === returning)) leave(conn, ws);
+        reattach(room, returning, ws);
+        return { role: 'player', room, player: returning };
+      }
+      leave(conn, ws);
       if (room.players.size >= MAX_PLAYERS) {
         scheduleCleanup(room);
         sendError(ws, 'room_full', `This room already has ${MAX_PLAYERS} players.`);
@@ -237,14 +297,16 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
         slot: freeSlot(room),
         cam: false,
         mic: false,
+        online: true,
         ws,
+        resumeToken: randomBytes(18).toString('base64url'),
         features: null,
         samples: [],
         speech: [],
       };
       room.players.set(player.id, player);
       console.log(`[room ${code}] ${player.name} joined`);
-      send(ws, { t: 'welcome', room: code, playerId: player.id });
+      send(ws, { t: 'welcome', room: code, playerId: player.id, resume: player.resumeToken });
       broadcastRoom(room);
       room.game.syncTo(ws);
       // Always, so a phone that reconnects stops sending full frames if the view closed meanwhile.
@@ -339,7 +401,7 @@ export function createSocketServer() {
       conn = handleMessage(ws, conn, msg);
     });
 
-    ws.on('close', () => leave(conn, ws));
+    ws.on('close', () => leave(conn, ws, true));
     ws.on('error', (err) => console.warn('[ws] error:', err.message));
   });
 

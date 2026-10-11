@@ -6,10 +6,11 @@ import { Play } from './pages/Play';
 // The big screen pulls in three.js; phones never download it.
 const Host = lazy(() => import('./pages/Host').then((m) => ({ default: m.Host })));
 const EvidenceBoard = lazy(() => import('./host/EvidenceBoard').then((m) => ({ default: m.EvidenceBoard })));
+const Admin = lazy(() => import('./pages/Admin').then((m) => ({ default: m.Admin })));
 
 /** The big screen and the replay sit on the dark stage; everything else is light. */
 export function surfaceFor(path: string): 'light' | 'dark' {
-  return /^\/(host|replay)\//.test(path) ? 'dark' : 'light';
+  return /^\/(host|replay)\//.test(path) || path === '/admin' ? 'dark' : 'light';
 }
 
 function Message({ title, body }: { title: string; body: string }) {
@@ -29,9 +30,27 @@ function Loading({ text }: { text: string }) {
   return <main className="loading-page">{text}</main>;
 }
 
+/**
+ * Where a replay's way-back link goes, from its &from=: the live room it was opened from, the
+ * admin page, or nowhere for a phone (it opened in a new tab next to the game).
+ */
+function replayBack(code: string, from: string | null): { href: string; label: string } | null {
+  if (from === 'phone') return null;
+  if (from === 'admin') return { href: '/admin', label: 'Back to all rounds' };
+  const room = normalizeRoomCode(from ?? '');
+  return room ? { href: `/host/${room}`, label: `Back to room ${room}` } : { href: `/host/${code}`, label: 'Exit replay' };
+}
+
 export function App() {
   const path = window.location.pathname;
   if (path === '/') return <Landing />;
+  if (path === '/admin') {
+    return (
+      <Suspense fallback={<Loading text="Loading…" />}>
+        <Admin />
+      </Suspense>
+    );
+  }
 
   const match = path.match(/^\/(host|play|replay)\/([^/]+)(?:\/(\d+))?\/?$/);
   if (!match) return <Message title="Nothing here." body="That page doesn't exist." />;
@@ -42,13 +61,15 @@ export function App() {
 
   if (kind === 'host' && !round) {
     // ?demo=N plays back round N of this room from its recording (?demo alone means round 1).
-    // &from=CODE is the live room it was opened from, for the way back.
     const params = new URLSearchParams(location.search);
     const demo = params.get('demo');
-    const from = normalizeRoomCode(params.get('from') ?? '') ?? undefined;
     return (
       <Suspense fallback={<Loading text="Loading the big screen…" />}>
-        <Host code={code} demo={demo === null ? undefined : Math.max(1, Math.floor(Number(demo)) || 1)} from={from} />
+        <Host
+          code={code}
+          demo={demo === null ? undefined : Math.max(1, Math.floor(Number(demo)) || 1)}
+          back={replayBack(code, params.get('from'))}
+        />
       </Suspense>
     );
   }

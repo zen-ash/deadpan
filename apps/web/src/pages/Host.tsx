@@ -1,13 +1,13 @@
 import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type SpokenLine, type Verdict } from '@deadpan/shared';
 import QRCode from 'qrcode';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { HostAudio } from '../host/audio';
 import { CameraView } from '../host/CameraView';
 import { DemoSocket } from '../host/demo';
 import { EvidenceBoard } from '../host/EvidenceBoard';
 import { PastRounds } from '../host/PastRounds';
 import { Interrogation } from '../host/Interrogation';
-import { layoutSuspects, stageArea, type Reserved } from '../host/layout';
+import { layoutSuspects, NARROW_W, stageArea, type Reserved } from '../host/layout';
 import { live } from '../host/live';
 import { Room, type SuspectView } from '../host/Room';
 import type { CardMoment } from '../host/SuspectCard';
@@ -70,11 +70,11 @@ interface HostProps {
   code: string;
   /** Plays back that recorded round of the room instead of joining it live. */
   demo?: number;
-  /** In demo mode, the live room the replay was opened from. */
-  from?: string;
+  /** In demo mode, the way back out of the replay (none when a phone opened it in a new tab). */
+  back?: { href: string; label: string } | null;
 }
 
-export function Host({ code, demo, from }: HostProps) {
+export function Host({ code, demo, back }: HostProps) {
   const socketRef = useRef<Link | null>(null);
   const roundRef = useRef(0);
   /** Every name seen in this room, so players who leave keep theirs on the verdict. */
@@ -106,7 +106,10 @@ export function Host({ code, demo, from }: HostProps) {
   const [headRef, headBox] = useBox<HTMLDivElement>();
   const [stageRef, stageBox] = useBox<HTMLDivElement>();
   const [dockRef, dockBox] = useBox<HTMLUListElement>();
+  const [barRef, barBox] = useBox<HTMLElement>();
   const joinUrl = `${location.origin}/play/${code}`;
+  /** A phone-sized window (a replay opened from a phone): faces in a grid with name tags. */
+  const narrow = viewport.w < NARROW_W;
 
   useEffect(() => {
     QRCode.toDataURL(joinUrl, { margin: 1, width: 480, errorCorrectionLevel: 'M' }).then(setQr, () => setQr(''));
@@ -265,15 +268,21 @@ export function Host({ code, demo, from }: HostProps) {
   // In the lobby, the empty seats take one more slot in the lineup (a replay has no seats to fill).
   const openSeats = inRound || demo ? 0 : MAX_PLAYERS - players.length;
   const headH = headBox?.height ?? 150;
+  const gap = narrow ? 16 : TEXT_GAP;
   const reserved: Reserved = inRound
     ? {
         left: 0,
-        top: (stageBox?.bottom ?? viewport.h * 0.32) + TEXT_GAP,
+        top: (stageBox?.bottom ?? viewport.h * 0.32) + gap,
         bottom: dockBox ? viewport.h - dockBox.top + 16 : 24,
       }
-    : { left: (panelBox?.right ?? 0) + 40, top: TOP_BAR_H + headH + TEXT_GAP, bottom: 24 };
+    : narrow
+      ? // The join panel stacks at the top on a phone, so the faces go under it.
+        { left: 0, top: (panelBox?.bottom ?? viewport.h * 0.5) + gap, bottom: 24 }
+      : { left: (panelBox?.right ?? 0) + 40, top: TOP_BAR_H + headH + TEXT_GAP, bottom: 24 };
   const area = stageArea(viewport, reserved);
-  const slots = layoutSuspects(suspects.length + (openSeats > 0 ? 1 : 0), area, inRound, viewport.h);
+  const slots = layoutSuspects(suspects.length + (openSeats > 0 ? 1 : 0), area, inRound, viewport.h, narrow);
+  // On a phone the top bar can wrap, so the round's text starts under wherever it ends.
+  const overlayStyle = narrow && barBox ? ({ '--stage-top': `${Math.round(barBox.bottom + 12)}px` } as CSSProperties) : undefined;
   /** One line for the camera view on where the game is. */
   const cameraStatus = () => {
     if (!inRound) return players.length === 0 ? 'Lobby' : `Lobby · ${players.length} ${players.length === 1 ? 'phone' : 'phones'}`;
@@ -301,8 +310,8 @@ export function Host({ code, demo, from }: HostProps) {
       />
       <SuspectCards suspects={suspects} slots={slots} openSeats={openSeats} activeId={activeId} moment={moment} />
 
-      <div className="overlay">
-        <header className={`top-bar ${inRound ? 'round' : ''}`}>
+      <div className="overlay" style={overlayStyle}>
+        <header className={`top-bar ${inRound ? 'round' : ''}`} ref={barRef}>
           {inRound && demo ? (
             // A replay has nobody to join, so the chip says what's playing instead.
             <aside className="join-chip replay" aria-label="Recorded round">
@@ -344,18 +353,20 @@ export function Host({ code, demo, from }: HostProps) {
                 Turn on sound
               </button>
             )}
-            {!inRound && !demo && (
+            {!inRound && !demo && !narrow && (
               <button className="btn glass" onClick={() => setPastRounds(true)}>
                 Past rounds
               </button>
             )}
-            <button className="btn glass" onClick={() => showCameraView(true)}>
-              Camera view
-            </button>
-            {/* A replay opened from a live room goes back to it; one opened by its link goes live in its own room. */}
-            {!inRound && demo && (
-              <a className="btn glass" href={`/host/${from ?? code}`}>
-                {from ? `Back to room ${from}` : 'Exit replay'}
+            {/* Too small to read on a phone. */}
+            {!narrow && (
+              <button className="btn glass" onClick={() => showCameraView(true)}>
+                Camera view
+              </button>
+            )}
+            {!inRound && demo && back && (
+              <a className="btn glass" href={back.href}>
+                {back.label}
               </a>
             )}
             {inRound && game.phase !== 'verdict' && (
@@ -378,9 +389,11 @@ export function Host({ code, demo, from }: HostProps) {
                 <button className="btn glass" onClick={() => send('start_round')}>
                   Play again
                 </button>
-                <button className="btn glass" onClick={() => send('end_round')}>
-                  Lobby
-                </button>
+                {!narrow && (
+                  <button className="btn glass" onClick={() => send('end_round')}>
+                    Lobby
+                  </button>
+                )}
               </>
             )}
           </nav>
@@ -467,7 +480,7 @@ export function Host({ code, demo, from }: HostProps) {
       )}
 
       {pastRounds && (
-        <PastRounds from={code} onEvidence={(room, round) => setEvidence({ room, round })} onClose={() => setPastRounds(false)} />
+        <PastRounds room={code} onEvidence={(room, round) => setEvidence({ room, round })} onClose={() => setPastRounds(false)} />
       )}
 
       {evidence !== null && (

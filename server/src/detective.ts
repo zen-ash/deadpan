@@ -10,7 +10,8 @@ import { tokens } from './words';
 const FOLLOWUP_MODEL = 'gemini-3.8-flash';
 const VERDICT_MODEL = 'gemini-3.8-flash';
 const FOLLOWUP_TIMEOUT_MS = 5000;
-const VERDICT_TIMEOUT_MS = 6000;
+/** Counted from the start of "I've heard enough" (about 3 s) plus the 3.5 s drumroll. */
+const VERDICT_TIMEOUT_MS = 8000;
 /** A follow-up longer than this is rambling; use a canned line instead. */
 const MAX_FOLLOWUP_WORDS = 60;
 
@@ -225,7 +226,7 @@ export async function followUp(ctx: DetectiveContext): Promise<FollowUp | null> 
   return { targetId, spoken };
 }
 
-/** SPEC verdict call: 3.8 Flash at low thinking, 6 s. Null means use the local verdict. */
+/** SPEC verdict call: 3.8 Flash at low thinking, 8 s from the start of the verdict phase. Null means use the local verdict. */
 export async function verdict(ctx: DetectiveContext, scores: PlayerScore[]): Promise<GeminiVerdict | null> {
   const ids = ctx.players.map((p) => p.id);
   if (ids.length === 0) return null;

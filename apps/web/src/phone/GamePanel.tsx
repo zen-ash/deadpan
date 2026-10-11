@@ -29,7 +29,7 @@ export function GamePanel({ code, game, playerId, name, secret, verdict, faceLos
   let screen: ReactNode;
   if (game.phase === 'verdict') {
     if (game.verdictStage === 'revealed' && verdict) {
-      screen = <Result verdict={verdict} playerId={playerId} name={name} />;
+      screen = <Result code={code} verdict={verdict} playerId={playerId} name={name} />;
     } else if (game.verdictStage === 'accusing' && verdict) {
       screen = (
         <>
@@ -239,7 +239,7 @@ function CaseFile({ secret, caseNo, short = false }: { secret: string | null; ca
   );
 }
 
-function Result({ verdict, playerId, name }: { verdict: Verdict; playerId: string | null; name(id: string): string }) {
+function Result({ code, verdict, playerId, name }: { code: string; verdict: Verdict; playerId: string | null; name(id: string): string }) {
   const accused = name(verdict.accusedId);
   const imposter = name(verdict.imposterId);
   const wasImposter = playerId === verdict.imposterId;
@@ -264,7 +264,12 @@ function Result({ verdict, playerId, name }: { verdict: Verdict; playerId: strin
       </p>
       <div className="result-card">
         <p className="display">{personal}</p>
-        <p>The evidence is on the big screen.</p>
+        <p>
+          {/* A new tab, so this one stays in the room for the next round. */}
+          <a className="replay-link" href={`/host/${code}?demo=${verdict.round}&from=phone`} target="_blank" rel="noopener">
+            Watch the replay →
+          </a>
+        </p>
       </div>
     </>
   );

@@ -6,6 +6,8 @@ import { speakLine } from './speech';
 
 /** A line that hasn't started playing after this long is read by the laptop voice instead. */
 const STALL_MS = 4000;
+/** A line whose playback stops moving for this long (a stream that hung) is skipped, so it can't block the lines after it. */
+const STUCK_MS = 5000;
 const SFX_GAIN = 0.8;
 const ROOM_TONE_GAIN = 0.18;
 
@@ -26,7 +28,7 @@ export class HostAudio {
   private roomTone: { source: AudioBufferSourceNode; gain: GainNode } | null = null;
   private wantRoomTone = false;
   private readonly queue: Queued[] = [];
-  private current: { item: Queued; finish: () => void } | null = null;
+  private current: { item: Queued; finish: () => void; stop: () => void } | null = null;
 
   constructor() {
     this.el.preload = 'auto';
@@ -54,6 +56,7 @@ export class HostAudio {
   /** Drops everything queued and stops the current line (the round ended). */
   stopLines() {
     this.queue.length = 0;
+    this.current?.stop();
     this.el.pause();
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     this.current = null;
@@ -97,10 +100,22 @@ export class HostAudio {
     if (!item) return;
     let finished = false;
     let stall: number | undefined;
+    let lastTime = -1;
+    let lastMoveAt = Date.now();
+    const watch = window.setInterval(() => {
+      if (this.el.currentTime !== lastTime) {
+        lastTime = this.el.currentTime;
+        lastMoveAt = Date.now();
+      } else if (!this.el.paused && Date.now() - lastMoveAt > STUCK_MS) {
+        console.warn('A detective line stopped mid-way; skipping it.');
+        finish();
+      }
+    }, 1000);
     const finish = () => {
       if (finished) return;
       finished = true;
       clearTimeout(stall);
+      clearInterval(watch);
       this.el.onended = null;
       this.el.onerror = null;
       this.el.onplaying = null;
@@ -112,12 +127,19 @@ export class HostAudio {
     const fallback = () => {
       if (finished) return;
       clearTimeout(stall);
+      clearInterval(watch);
       this.el.onended = null;
       this.el.onerror = null;
       this.el.pause();
       void speakLine(item.line.text).then(finish);
     };
-    this.current = { item, finish };
+    // Dropped without reporting an end: the round it belonged to is over.
+    const stop = () => {
+      finished = true;
+      clearTimeout(stall);
+      clearInterval(watch);
+    };
+    this.current = { item, finish, stop };
     this.el.onended = finish;
     this.el.onerror = fallback;
     this.el.onplaying = () => clearTimeout(stall);
@@ -135,7 +157,7 @@ export class HostAudio {
     await Promise.all(
       SFX_NAMES.map(async (name) => {
         try {
-          const res = await fetch(`/api/sfx/${name}.mp3`);
+          const res = await fetch(`/api/sfx/${name}.mp3`, { signal: AbortSignal.timeout(15_000) });
           if (!res.ok) return;
           this.buffers.set(name, await ctx.decodeAudioData(await res.arrayBuffer()));
         } catch {

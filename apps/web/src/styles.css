@@ -1549,6 +1549,12 @@ button.room-tag {
   line-height: 1.4;
 }
 
+.result-card .replay-link {
+  color: #000;
+  font-weight: 600;
+  text-underline-offset: 3px;
+}
+
 /* The live signals readout, from the Signals button in the header (or ?debug=1). */
 
 .debug {
@@ -1892,7 +1898,7 @@ button.room-tag {
 
 .stage {
   position: absolute;
-  top: 72px;
+  top: var(--stage-top, 72px);
   left: 50%;
   display: flex;
   flex-direction: column;
@@ -1904,7 +1910,7 @@ button.room-tag {
 }
 
 .stage.verdict {
-  top: 104px;
+  top: var(--stage-top, 104px);
 }
 
 .stage-eyebrow {
@@ -3194,10 +3200,86 @@ button.room-tag {
   font-size: 14px;
 }
 
+.round-actions .btn[aria-disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+
 @media (max-width: 760px) {
   .round-row {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* The owner's /admin page: every round from every room, behind the admin key. */
+
+.admin-page {
+  position: relative;
+  min-height: 100%;
+  padding: clamp(16px, 5vh, 56px) 16px;
+  background: var(--stage-bg);
+  background-attachment: fixed;
+  color: var(--stage-text);
+}
+
+.admin-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: min(420px, 100%);
+  margin: 10vh auto 0;
+  padding: 36px 28px;
+  border: 1px solid var(--stage-hair);
+  border-radius: 28px;
+  background: rgba(12, 14, 19, 0.7);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  text-align: center;
+}
+
+.admin-title {
+  margin-top: 8px;
+  font: 400 52px/1 var(--serif);
+  letter-spacing: -0.03em;
+}
+
+.admin-sub {
+  color: var(--stage-2);
+  font-size: 15px;
+}
+
+.admin-key {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 18px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--stage-text);
+  font: inherit;
+  outline: none;
+}
+
+.admin-key:focus {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.admin-gate .btn {
+  align-self: stretch;
+}
+
+.admin-error {
+  color: var(--coral);
+  font-size: 15px;
+}
+
+.rounds.admin {
+  margin: 0 auto;
+}
+
+.rounds.admin .rounds-sub + .rounds-sub {
+  margin-top: 4px;
 }
 
 /* Camera view: what each phone's vision pipeline sees, for the computer vision judges. */
@@ -3529,6 +3611,51 @@ button.room-tag {
   padding-top: 6px;
 }
 
+/* Name tags under the faces on a phone-sized screen. */
+
+.suspect-card.nametag {
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 150px;
+  height: 58px;
+  padding: 6px 10px;
+  border-radius: 14px;
+}
+
+.nametag .suspect-head {
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.nametag .suspect-name {
+  font-size: 22px;
+}
+
+/* Just the status dot; there's no room for its words. */
+.nametag .suspect-status {
+  gap: 0;
+  font-size: 0;
+}
+
+.nametag .suspect-status.drift {
+  display: none;
+}
+
+.nametag-stamp {
+  color: var(--coral);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.nametag-stamp.escaped {
+  color: var(--warn-dark);
+}
+
 /* Only a phone-sized window stacks the join panel; anything wider keeps the lineup beside it. */
 @media (max-width: 560px) {
   .lobby-panel {
@@ -3537,6 +3664,111 @@ button.room-tag {
     max-height: none;
     margin: 96px 16px 16px;
     transform: none;
+  }
+
+  /* The big screen opened on a phone (a replay): smaller type, and the bar may wrap. */
+  .lineup-head,
+  .top-actions .open-tag {
+    display: none;
+  }
+
+  .top-bar,
+  .top-bar.round {
+    flex-wrap: wrap;
+    padding: 12px 12px 0;
+  }
+
+  .top-actions {
+    gap: 8px;
+  }
+
+  .top-actions .btn {
+    min-height: 40px;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+
+  .join-chip.replay {
+    padding: 6px 14px;
+  }
+
+  .join-chip.replay .wordmark {
+    display: none;
+  }
+
+  .join-chip-code {
+    font-size: 24px;
+  }
+
+  .stage {
+    width: calc(100vw - 32px);
+  }
+
+  .stage-eyebrow {
+    font-size: 12px;
+  }
+
+  .stage-asks {
+    margin-top: 6px;
+    font-size: 15px;
+  }
+
+  .stage-line {
+    margin-top: 8px;
+    font-size: 26px;
+  }
+
+  .stage-line.long {
+    font-size: 22px;
+  }
+
+  .stage-line.longer {
+    font-size: 19px;
+  }
+
+  .timer {
+    margin-top: 10px;
+  }
+
+  .timer-track {
+    width: 180px;
+  }
+
+  .stage-transcript {
+    margin-top: 6px;
+    font-size: 14px;
+  }
+
+  .stage-count {
+    font-size: 56px;
+  }
+
+  .verdict-title {
+    font-size: 56px;
+  }
+
+  .accused-name {
+    font-size: 52px;
+  }
+
+  .verdict-text,
+  .accused-line {
+    font-size: 15px;
+  }
+
+  .verdict-text .word {
+    font-size: 18px;
+  }
+
+  .chips-dock {
+    bottom: 12px;
+    gap: 6px;
+    width: calc(100vw - 24px);
+  }
+
+  .chips-dock li {
+    padding: 6px 12px;
+    font-size: 13px;
   }
 }
 
