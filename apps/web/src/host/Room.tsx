@@ -46,6 +46,8 @@ interface RoomProps {
   activeId: string | null;
   /** Baseline phase: rings around each face. */
   calibrating: boolean;
+  /** Stop drawing while something covers the whole room (the camera view). */
+  paused?: boolean;
 }
 
 /** World placement for a screen slot: position at depth 0 and the face's height in world units. */
@@ -68,7 +70,14 @@ function usePlacements(slots: Slot[]): Placement[] {
 
 export function Room(props: RoomProps) {
   return (
-    <Canvas className="room-canvas" shadows dpr={[1, 2]} gl={{ antialias: false }} camera={{ position: [0, CAM_Y, CAM_Z], fov: FOV }}>
+    <Canvas
+      className="room-canvas"
+      frameloop={props.paused ? 'never' : 'always'}
+      shadows
+      dpr={[1, 2]}
+      gl={{ antialias: false }}
+      camera={{ position: [0, CAM_Y, CAM_Z], fov: FOV }}
+    >
       <color attach="background" args={['#07080b']} />
       <fog attach="fog" args={['#07080b', 9, 20]} />
       <Scene {...props} />

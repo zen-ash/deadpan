@@ -28,13 +28,15 @@ export class PhoneSignals {
   private readonly timer: number;
   private readonly watchdog: number;
   private sentMeshVersion = -1;
+  private sentFullVersion = -1;
+  private fullFrames = false;
   private packetTimes: number[] = [];
   private sileroSince = 0;
   private slowSeconds = 0;
   private stopped = false;
 
   constructor(
-    video: HTMLVideoElement,
+    private readonly video: HTMLVideoElement,
     audioCtx: AudioContext,
     analyser: AnalyserNode,
     stream: MediaStream,
@@ -49,7 +51,9 @@ export class PhoneSignals {
 
     landmarker.then(
       ({ landmarker, delegate }) => {
-        if (!this.stopped) this.face = new FaceTracker(video, landmarker, delegate);
+        if (this.stopped) return;
+        this.face = new FaceTracker(video, landmarker, delegate);
+        this.face.wantFull = this.fullFrames;
       },
       (err: unknown) => {
         this.faceError = err instanceof Error ? err.message : String(err);
@@ -62,6 +66,12 @@ export class PhoneSignals {
 
     this.timer = window.setInterval(this.sendPacket, 1000 / FEATURE_HZ);
     this.watchdog = window.setInterval(this.checkSpeed, 1000);
+  }
+
+  /** The big screen's camera view is open: also send every landmark, placed in the camera frame. */
+  set cameraView(on: boolean) {
+    this.fullFrames = on;
+    if (this.face) this.face.wantFull = on;
   }
 
   stop() {
@@ -87,6 +97,23 @@ export class PhoneSignals {
       hr: face?.face.present
         ? { bpm: face.heart.bpm === null ? null : Math.round(face.heart.bpm), quality: Math.round(face.heart.quality * 100) / 100 }
         : { bpm: null, quality: 0 },
+      vision: face
+        ? {
+            inferMs: round2(face.stats.inferMs),
+            gpu: face.stats.delegate === 'GPU',
+            frameW: this.video.videoWidth,
+            frameH: this.video.videoHeight,
+            ear: round2(face.takeEarMin()),
+            earOpen: round2(face.stats.earOpen),
+            eyesClosed: face.stats.eyesClosed,
+            lastBlinkMs: Math.round(face.stats.lastBlinkMs),
+            perclos: round2(face.stats.perclos),
+            yaw: round2(face.stats.yaw),
+            pitch: round2(face.stats.pitch),
+            roll: round2(face.stats.roll),
+            vad: this.voice.vadMode,
+          }
+        : undefined,
     };
     this.sink.send({ t: 'features', ...packet });
     this.lastPacket = packet;
@@ -94,6 +121,10 @@ export class PhoneSignals {
     if (face?.mesh && face.meshVersion !== this.sentMeshVersion) {
       this.sentMeshVersion = face.meshVersion;
       this.sink.sendBinary(face.mesh);
+    }
+    if (face?.full && face.meshVersion !== this.sentFullVersion) {
+      this.sentFullVersion = face.meshVersion;
+      this.sink.sendBinary(face.full);
     }
 
     this.packetTimes.push(now);
@@ -124,3 +155,5 @@ export class PhoneSignals {
     }
   };
 }
+
+const round2 = (v: number) => Math.round(v * 100) / 100;

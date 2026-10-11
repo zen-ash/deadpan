@@ -12,6 +12,7 @@ import {
   type AnswerResult,
   type ClientToServer,
   type FeaturesPacket,
+  type RoundEvent,
   type RoundFile,
   type SfxName,
   type GameState,
@@ -26,7 +27,7 @@ import type { WebSocket } from 'ws';
 import { canned, dynamic, sfxMs, type Line } from './audio';
 import * as detective from './detective';
 import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, HMM, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
-import { RoundRecorder } from './recorder';
+import { lastSavedRound, RoundRecorder } from './recorder';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
 import { answerMetrics, buildBaseline, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
 import { scribeUrl } from './scribe';
@@ -92,7 +93,10 @@ export class ImposterGame {
   private lineSeq = 0;
   private recorder: RoundRecorder | null = null;
 
-  constructor(private readonly room: Room) {}
+  constructor(private readonly room: Room) {
+    // Carry on from rounds saved under this code before, so none of them gets overwritten.
+    this.round = lastSavedRound(room.code);
+  }
 
   get state(): GameState {
     return {
@@ -262,7 +266,7 @@ export class ImposterGame {
     this.recorder?.verdict(verdict);
     this.verdictStage = 'accusing';
     this.broadcastState();
-    broadcast(this.room, { t: 'verdict', ...verdict });
+    this.toAll({ t: 'verdict', ...verdict });
     await this.say(run, line);
 
     if (!live()) return;
@@ -385,7 +389,7 @@ export class ImposterGame {
     const text = String(msg.text ?? '').slice(0, 2000);
     turn.text = text;
     if (Array.isArray(msg.words) && msg.words.length > 0) turn.words = sanitizeWords(msg.words);
-    sendToHosts(this.room, { t: 'live_transcript', playerId: player.id, turnId: turn.info.id, text, final: Boolean(msg.final) });
+    this.toHosts({ t: 'live_transcript', playerId: player.id, turnId: turn.info.id, text, final: Boolean(msg.final) });
     if (msg.final) {
       turn.final = true;
       if (turn.info.stage === 'scoring') this.scoreTurn(turn);
@@ -452,7 +456,7 @@ export class ImposterGame {
       this.answers.push(result);
       this.recorder?.answer(result);
       this.recorder?.transcript(turn.info.id, player.id, turn.text, turn.words);
-      sendToHosts(this.room, { t: 'answer', ...result });
+      this.toHosts({ t: 'answer', ...result });
       const rt = metrics.rtMs === null ? 'no speech' : `rt ${(metrics.rtMs / 1000).toFixed(2)} s`;
       const drift = result.delivery === null ? '' : `, drift ${result.delivery.toFixed(2)}`;
       this.log(`${player.name} ${turn.info.kind}: ${rt}, ${metrics.words} words${drift}`);
@@ -494,7 +498,7 @@ export class ImposterGame {
       this.pendingLine = { id, done };
       const spoken = { id, url: line.url, text: line.text };
       this.recorder?.line(spoken);
-      sendToHosts(this.room, { t: 'say', line: spoken });
+      this.toHosts({ t: 'say', line: spoken });
     });
   }
 
@@ -532,7 +536,7 @@ export class ImposterGame {
 
   private sfx(name: SfxName) {
     this.recorder?.sfx(name);
-    sendToHosts(this.room, { t: 'sfx', name });
+    this.toHosts({ t: 'sfx', name });
   }
 
   private setPhase(phase: Phase) {
@@ -541,7 +545,19 @@ export class ImposterGame {
   }
 
   private broadcastState() {
-    broadcast(this.room, { t: 'state', ...this.state });
+    this.toAll({ t: 'state', ...this.state });
+  }
+
+  // Game messages to the big screen also go into the recording, for demo mode to play back.
+
+  private toHosts(msg: RoundEvent) {
+    if (this.phase !== 'lobby') this.recorder?.event(msg);
+    sendToHosts(this.room, msg);
+  }
+
+  private toAll(msg: RoundEvent) {
+    if (this.phase !== 'lobby') this.recorder?.event(msg);
+    broadcast(this.room, msg);
   }
 
   private after(turn: ActiveTurn, ms: number, fn: () => void) {

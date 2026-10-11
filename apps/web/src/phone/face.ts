@@ -1,12 +1,16 @@
 // Face tracking on the phone: MediaPipe FaceLandmarker on the WebGL GPU delegate at ~15 fps,
 // turned into per-frame features and a decimated, quantized mesh for the big screen.
-import { MESH_HEADER, MESH_MAGIC, MESH_POINTS, MESH_QUANT, type FaceFeatures } from '@deadpan/shared';
+import { CV_MAGIC, CV_QUANT, MESH_HEADER, MESH_MAGIC, MESH_POINTS, MESH_QUANT, type FaceFeatures } from '@deadpan/shared';
 import type { FaceLandmarker, FaceLandmarkerOptions, FaceLandmarkerResult, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { VENDOR } from '../vendor';
 import { HeartRate } from './heart';
 
 const TARGET_FPS = 15;
 const BLINK_WINDOW_MS = 60_000;
+/** PERCLOS, the share of time with the eyes shut, is taken over this window. */
+const PERCLOS_WINDOW_MS = 30_000;
+/** Landmarks in a full frame for the camera view, irises included. */
+const FULL_LANDMARKS = 478;
 
 export type Delegate = 'GPU' | 'CPU';
 export interface LoadedLandmarker {
@@ -53,6 +57,17 @@ export interface FaceStats {
   blinkScore: number;
   ear: number;
   jawOpen: number;
+  /** Lowest eye aspect ratio since the last takeEarMin(), so a blink between packets still shows. */
+  earMin: number;
+  /** This player's open-eye aspect ratio, learned from clearly open frames. */
+  earOpen: number;
+  eyesClosed: boolean;
+  lastBlinkMs: number;
+  perclos: number;
+  /** Head pose in degrees. */
+  yaw: number;
+  pitch: number;
+  roll: number;
 }
 
 /** Runs the landmarker on a playing <video> and keeps the latest features and mesh. */
@@ -72,6 +87,9 @@ export class FaceTracker {
   mesh: Int16Array<ArrayBuffer> | null = null;
   /** Bumped every time `mesh` changes, so senders can skip duplicates. */
   meshVersion = 0;
+  /** Set while the big screen's camera view is open: every landmark, placed in the camera frame. */
+  wantFull = false;
+  full: Int16Array<ArrayBuffer> | null = null;
   /** Camera heart rate, from skin colour in the same frames. */
   readonly heart = new HeartRate();
 
@@ -80,6 +98,9 @@ export class FaceTracker {
   private readonly brow = new Smoother(0.25);
   private readonly gaze = new Smoother(0.3);
   private readonly motion = new Smoother(0.4);
+  private readonly yaw = new Smoother(0.15);
+  private readonly pitch = new Smoother(0.15);
+  private readonly roll = new Smoother(0.15);
   private speakingLevel = 0;
   private prevMatrix: number[] | null = null;
   private prevFrameAt = 0;
@@ -94,12 +115,35 @@ export class FaceTracker {
     private readonly landmarker: FaceLandmarker,
     delegate: Delegate,
   ) {
-    this.stats = { fps: 0, inferMs: 0, delegate, errors: 0, blinkScore: 0, ear: 0, jawOpen: 0 };
+    this.stats = {
+      fps: 0,
+      inferMs: 0,
+      delegate,
+      errors: 0,
+      blinkScore: 0,
+      ear: 0,
+      jawOpen: 0,
+      earMin: Infinity,
+      earOpen: 0,
+      eyesClosed: false,
+      lastBlinkMs: 0,
+      perclos: 0,
+      yaw: 0,
+      pitch: 0,
+      roll: 0,
+    };
     this.schedule();
   }
 
   stop() {
     this.stopped = true;
+  }
+
+  /** The lowest eye aspect ratio since the last call (the current one if no frame came in). */
+  takeEarMin(): number {
+    const min = Number.isFinite(this.stats.earMin) ? this.stats.earMin : this.stats.ear;
+    this.stats.earMin = Infinity;
+    return min;
   }
 
   private schedule() {
@@ -142,6 +186,7 @@ export class FaceTracker {
       this.face.speaking = false;
       this.face.blinkPm = this.blinks.perMinute(now);
       this.prevMatrix = null;
+      this.full = null;
       if (this.mesh) {
         this.mesh = null;
         this.meshVersion++;
@@ -159,7 +204,7 @@ export class FaceTracker {
     // cross-checked against the eye aspect ratio from the landmarks.
     const blinkScore = (s('eyeBlinkLeft') + s('eyeBlinkRight')) / 2;
     const ear = (eyeAspectRatio(landmarks, RIGHT_EYE, w, h) + eyeAspectRatio(landmarks, LEFT_EYE, w, h)) / 2;
-    this.blinks.update(now, blinkScore, ear);
+    this.blinks.update(now, blinkScore, ear, dt);
 
     // Gaze off-centre. "Out" on the left eye and "in" on the right eye both mean looking
     // towards the player's left.
@@ -175,6 +220,10 @@ export class FaceTracker {
     if (matrix && matrix.length === 16) {
       if (this.prevMatrix) this.motion.update(headMotion(this.prevMatrix, matrix) / dt, dt);
       this.prevMatrix = Array.from(matrix);
+      const pose = headPose(matrix);
+      this.stats.yaw = this.yaw.update(pose.yaw, dt);
+      this.stats.pitch = this.pitch.update(pose.pitch, dt);
+      this.stats.roll = this.roll.update(pose.roll, dt);
     }
 
     this.face.present = true;
@@ -188,9 +237,15 @@ export class FaceTracker {
 
     this.stats.blinkScore = blinkScore;
     this.stats.ear = ear;
+    this.stats.earMin = Math.min(this.stats.earMin, ear);
+    this.stats.earOpen = this.blinks.openEar;
+    this.stats.eyesClosed = this.blinks.closed;
+    this.stats.lastBlinkMs = this.blinks.lastBlinkMs;
+    this.stats.perclos = this.blinks.perclos;
     this.stats.jawOpen = jawOpen;
 
     this.mesh = quantizeMesh(landmarks, w, h);
+    this.full = this.wantFull ? quantizeFull(landmarks) : null;
     this.meshVersion++;
     this.heart.addFrame(this.video, landmarks, now, this.motion.value);
   }
@@ -214,6 +269,35 @@ function headMotion(a: ArrayLike<number>, b: ArrayLike<number>): number {
   const degrees = (Math.acos(Math.min(1, Math.max(-1, (trace - 1) / 2))) * 180) / Math.PI;
   const cm = Math.hypot(b[12]! - a[12]!, b[13]! - a[13]!, b[14]! - a[14]!);
   return degrees + cm;
+}
+
+/**
+ * Turn, nod and tilt in degrees from a 4x4 column-major pose. The camera space has y up and looks
+ * down −z, so yaw is positive when the face points to the image's right and pitch when it looks up.
+ */
+function headPose(m: ArrayLike<number>): { yaw: number; pitch: number; roll: number } {
+  // r(row, col) of the rotation block.
+  const r = (row: number, col: number) => m[col * 4 + row]!;
+  const deg = 180 / Math.PI;
+  return {
+    yaw: Math.asin(Math.max(-1, Math.min(1, r(0, 2)))) * deg,
+    pitch: Math.atan2(r(1, 2), r(2, 2)) * deg,
+    roll: Math.atan2(r(1, 0), r(0, 0)) * deg,
+  };
+}
+
+/** Every landmark as a fraction of the camera frame, packed as int16 for the camera view. */
+function quantizeFull(lm: NormalizedLandmark[]): Int16Array<ArrayBuffer> {
+  const out = new Int16Array(MESH_HEADER + FULL_LANDMARKS * 3);
+  out[0] = CV_MAGIC;
+  const q = (v: number) => Math.max(-32767, Math.min(32767, Math.round(v * CV_QUANT)));
+  for (let i = 0; i < Math.min(FULL_LANDMARKS, lm.length); i++) {
+    const p = lm[i]!;
+    out[MESH_HEADER + i * 3] = q(p.x);
+    out[MESH_HEADER + i * 3 + 1] = q(p.y);
+    out[MESH_HEADER + i * 3 + 2] = q(p.z);
+  }
+  return out;
 }
 
 /** Centres the streamed landmarks on the face, scales by its size and packs them as int16. */
@@ -246,17 +330,26 @@ function quantizeMesh(lm: NormalizedLandmark[], w: number, h: number): Int16Arra
   return out;
 }
 
-/** Counts blinks over the last minute, using the blendshape score and the eye aspect ratio. */
+/**
+ * Counts blinks over the last minute, using the blendshape score and the eye aspect ratio. Also
+ * keeps PERCLOS, the share of the last 30 s with the eyes shut, which long closures dominate.
+ */
 class BlinkCounter {
   /** Every blink since tracking started. */
   total = 0;
-  private closed = false;
+  closed = false;
+  openEar = 0;
+  lastBlinkMs = 0;
+  perclos = 0;
   private closedAt = 0;
-  private openEar = 0;
   private readonly startedAt = performance.now();
   private readonly events: number[] = [];
+  /** [time, frame length in ms, eyes shut] for PERCLOS. */
+  private readonly frames: [number, number, boolean][] = [];
+  private framesMs = 0;
+  private closedMs = 0;
 
-  update(now: number, score: number, ear: number) {
+  update(now: number, score: number, ear: number, dt: number) {
     // Learn what this player's open eye looks like, only from clearly open frames.
     if (!this.closed && score < 0.3 && ear > 0) this.openEar = this.openEar ? this.openEar * 0.97 + ear * 0.03 : ear;
     const earClosed = this.openEar > 0 && ear < this.openEar * 0.72;
@@ -269,9 +362,21 @@ class BlinkCounter {
       if (now - this.closedAt <= 500) {
         this.events.push(now);
         this.total++;
+        this.lastBlinkMs = now - this.closedAt;
       }
     }
     while (this.events.length > 0 && now - this.events[0]! > BLINK_WINDOW_MS) this.events.shift();
+
+    const ms = dt * 1000;
+    this.frames.push([now, ms, this.closed]);
+    this.framesMs += ms;
+    if (this.closed) this.closedMs += ms;
+    while (this.frames.length > 0 && now - this.frames[0]![0] > PERCLOS_WINDOW_MS) {
+      const [, oldMs, wasClosed] = this.frames.shift()!;
+      this.framesMs -= oldMs;
+      if (wasClosed) this.closedMs -= oldMs;
+    }
+    this.perclos = this.framesMs > 0 ? Math.max(0, this.closedMs / this.framesMs) : 0;
   }
 
   perMinute(now: number): number {

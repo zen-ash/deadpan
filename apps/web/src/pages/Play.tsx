@@ -47,6 +47,8 @@ export function Play({ code }: { code: string }) {
   const healthRef = useRef<Health>({ cam: false, mic: false });
   const signalsRef = useRef<PhoneSignals | null>(null);
   const turnsRef = useRef<TurnController | null>(null);
+  /** The big screen's camera view is open, so full landmark frames go out too. */
+  const cameraViewRef = useRef(false);
 
   const [name, setName] = useState(loadName);
   const [stage, setStage] = useState<Stage>('setup');
@@ -128,6 +130,10 @@ export function Play({ code }: { code: string }) {
           case 'turn_over':
             void turnsRef.current?.onTurnOver(msg.turnId);
             break;
+          case 'camera_view':
+            cameraViewRef.current = msg.on;
+            if (signalsRef.current) signalsRef.current.cameraView = msg.on;
+            break;
         }
       },
     });
@@ -176,6 +182,7 @@ export function Play({ code }: { code: string }) {
       },
       { vad },
     );
+    next.cameraView = cameraViewRef.current;
     const turns = new TurnController({
       audioCtx: media.audioCtx,
       stream: media.stream,

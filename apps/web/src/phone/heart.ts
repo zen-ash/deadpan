@@ -2,6 +2,7 @@
 // the average skin colour of the forehead and cheeks, found from the face landmarks.
 // Samples are resampled to 30 Hz; over a 15 s window the strongest frequency in 0.7–3.5 Hz is the
 // pulse, and signal quality is that peak's share of the band's power.
+import { PULSE_REGIONS } from '@deadpan/shared';
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 
 const FS = 30;
@@ -18,13 +19,6 @@ const MIN_QUALITY = 0.3;
 const MAX_MOTION = 20;
 /** The video is analysed at a quarter of its size: averaging pixels is the point anyway. */
 const SCALE = 0.25;
-
-// Skin patches: above the brows, and the middle of each cheek.
-const REGIONS = [
-  [151, 108, 337, 107, 336, 9],
-  [50, 101, 118, 117, 123, 187, 205, 36],
-  [280, 330, 347, 346, 352, 411, 425, 266],
-];
 
 export interface Rgb {
   t: number;
@@ -58,7 +52,7 @@ export class HeartRate {
     let g = 0;
     let b = 0;
     let n = 0;
-    for (const region of REGIONS) {
+    for (const region of PULSE_REGIONS) {
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
       for (const i of region) {
         const p = landmarks[i];

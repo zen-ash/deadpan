@@ -1,7 +1,10 @@
 // Live per-player data on the big screen: features (10 Hz JSON), speech events, and mesh
-// frames (10 Hz binary). Kept outside React so the 3D meshes can read it every frame; cards
-// subscribe through useLivePlayer and re-render when it changes.
+// frames (10 Hz binary), plus full landmark frames while the camera view is open. Kept outside
+// React so the 3D meshes can read it every frame; cards subscribe through useLivePlayer and
+// re-render when it changes.
 import {
+  CV_MAGIC,
+  CV_QUANT,
   MESH_HEADER,
   MESH_MAGIC,
   MESH_POINTS,
@@ -18,6 +21,21 @@ const STALE_MS = 2000;
 const PITCH_HOLD_MS = 600;
 /** A face lost within this long ago shows as "Face lost at times" on the card. */
 const FACE_LOST_MEMORY_MS = 30_000;
+/** Signal history kept for the camera view's traces. */
+export const HISTORY_MS = 12_000;
+/** Landmarks in a full camera-view frame. */
+const FULL_POINTS = 478;
+
+/** One 10 Hz reading for the camera view's traces. */
+export interface HistoryPoint {
+  /** performance.now() when it arrived. */
+  t: number;
+  /** Eye aspect ratio over this player's open-eye level: 1 is open, below 0.72 is shut. */
+  eyes: number | null;
+  lip: number;
+  motion: number;
+  quality: number;
+}
 
 export interface LivePlayer {
   features: FeaturesPacket | null;
@@ -32,6 +50,12 @@ export interface LivePlayer {
   /** Target mesh positions in three.js space (y up, z towards the viewer). */
   mesh: Float32Array;
   meshAt: number;
+  /** Camera view: every landmark as a fraction of the camera frame (x right, y down), and z. */
+  full: Float32Array;
+  fullAt: number;
+  history: HistoryPoint[];
+  /** performance.now() of each blink in the history window. */
+  blinks: number[];
   version: number;
 }
 
@@ -66,6 +90,10 @@ class LiveStore {
         faceLostAt: -Infinity,
         mesh: new Float32Array(MESH_POINTS.length * 3),
         meshAt: -Infinity,
+        full: new Float32Array(FULL_POINTS * 3),
+        fullAt: -Infinity,
+        history: [],
+        blinks: [],
         version: 0,
       };
       this.players.set(id, p);
@@ -84,8 +112,20 @@ class LiveStore {
     if (msg.t === 'pf') {
       const { t: _t, id, ...features } = msg;
       const p = this.get(id);
+      const now = performance.now();
+      if (p.features && features.face.blinkCount > p.features.face.blinkCount) p.blinks.push(now);
+      const v = features.vision;
+      p.history.push({
+        t: now,
+        eyes: v && v.earOpen > 0 && features.face.present ? v.ear / v.earOpen : null,
+        lip: features.face.lipPress,
+        motion: features.face.headMotion,
+        quality: features.hr.quality,
+      });
+      while (p.history.length > 0 && now - p.history[0]!.t > HISTORY_MS) p.history.shift();
+      while (p.blinks.length > 0 && now - p.blinks[0]! > HISTORY_MS) p.blinks.shift();
       p.features = features;
-      p.featuresAt = performance.now();
+      p.featuresAt = now;
       if (!features.face.present) p.faceLostAt = p.featuresAt;
       if (features.voice.pitchHz !== null) {
         p.pitchHz = features.voice.pitchHz;
@@ -104,9 +144,15 @@ class LiveStore {
 
   handleMesh(data: ArrayBuffer) {
     const frame = new Int16Array(data);
-    if (frame.length !== MESH_HEADER + MESH_POINTS.length * 3 || frame[0] !== MESH_MAGIC) return;
-    const id = this.slots.get(frame[1]!);
+    const id = this.slots.get(frame[1] ?? -1);
     if (!id) return;
+    if (frame[0] === CV_MAGIC && frame.length === MESH_HEADER + FULL_POINTS * 3) {
+      const p = this.get(id);
+      for (let i = 0; i < FULL_POINTS * 3; i++) p.full[i] = frame[MESH_HEADER + i]! / CV_QUANT;
+      p.fullAt = performance.now();
+      return;
+    }
+    if (frame.length !== MESH_HEADER + MESH_POINTS.length * 3 || frame[0] !== MESH_MAGIC) return;
     const p = this.get(id);
     for (let i = 0; i < MESH_POINTS.length; i++) {
       const o = MESH_HEADER + i * 3;

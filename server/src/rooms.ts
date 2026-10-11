@@ -3,6 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import {
+  CV_MAGIC,
   MAX_NAME_LENGTH,
   MAX_PLAYERS,
   MESH_HEADER,
@@ -13,9 +14,11 @@ import {
   type ErrorCode,
   type FeaturesPacket,
   type HostToServer,
+  type VisionStats,
 } from '@deadpan/shared';
+import { FACE_LANDMARK_COUNT } from '@deadpan/shared/face';
 import { ImposterGame } from './game';
-import { broadcast, recordSample, recordSpeech, send, sendToHosts, type Player, type Room } from './room';
+import { broadcast, recordSample, recordSpeech, send, sendLive, sendToHosts, type Player, type Room } from './room';
 
 type Conn =
   | { role: 'none' }
@@ -25,6 +28,7 @@ type Conn =
 const EMPTY_ROOM_TTL_MS = 10 * 60_000;
 const HEARTBEAT_MS = 15_000;
 const MESH_BYTES = (MESH_HEADER + MESH_POINTS.length * 3) * 2;
+const FULL_BYTES = (MESH_HEADER + FACE_LANDMARK_COUNT * 3) * 2;
 /**
  * Speech events and "line finished" reports are sent the moment they happen, so their synced
  * timestamps must land just before the message arrived. Outside these windows the sender's clock
@@ -42,7 +46,7 @@ export function findRoom(code: string): Room | undefined {
 function getRoom(code: string): Room {
   let room = rooms.get(code);
   if (!room) {
-    const created = { code, players: new Map(), hosts: new Set() } as Omit<Room, 'game'> as Room;
+    const created = { code, players: new Map(), hosts: new Set(), cameraHosts: new Set() } as Omit<Room, 'game'> as Room;
     created.game = new ImposterGame(created);
     rooms.set(code, created);
     room = created;
@@ -73,6 +77,17 @@ function broadcastRoom(room: Room) {
     room: room.code,
     players: [...room.players.values()].map(({ id, name, slot, cam, mic }) => ({ id, name, slot, cam, mic })),
   });
+}
+
+/** Tells the phones to start or stop sending full landmark frames, when that changes. */
+function setCameraView(room: Room, ws: WebSocket, on: boolean) {
+  const was = room.cameraHosts.size > 0;
+  if (on) room.cameraHosts.add(ws);
+  else room.cameraHosts.delete(ws);
+  const now = room.cameraHosts.size > 0;
+  if (now === was) return;
+  console.log(`[room ${room.code}] camera view ${now ? 'opened' : 'closed'}`);
+  for (const p of room.players.values()) send(p.ws, { t: 'camera_view', on: now });
 }
 
 function freeSlot(room: Room): number {
@@ -111,17 +126,46 @@ function sanitizeFeatures(m: FeaturesPacket): FeaturesPacket | null {
     },
     voice: { pitchHz: numOrNull(voice.pitchHz), clarity: num(voice.clarity), vad: Boolean(voice.vad), rms: num(voice.rms) },
     hr: { bpm: numOrNull(hr?.bpm), quality: num(hr?.quality) },
+    vision: sanitizeVision(m.vision),
   };
 }
 
-/** Stamps the player's slot into a phone's mesh frame and passes it on to the hosts. */
+function sanitizeVision(v: VisionStats | undefined): VisionStats | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  return {
+    inferMs: num(v.inferMs),
+    gpu: Boolean(v.gpu),
+    frameW: num(v.frameW),
+    frameH: num(v.frameH),
+    ear: num(v.ear),
+    earOpen: num(v.earOpen),
+    eyesClosed: Boolean(v.eyesClosed),
+    lastBlinkMs: num(v.lastBlinkMs),
+    perclos: num(v.perclos),
+    yaw: num(v.yaw),
+    pitch: num(v.pitch),
+    roll: num(v.roll),
+    vad: v.vad === 'silero' || v.vad === 'loading' ? v.vad : 'rms',
+  };
+}
+
+/**
+ * Stamps the player's slot into a phone's mesh frame and passes it on to the hosts. Full landmark
+ * frames for the camera view only go out while it's open, and aren't recorded.
+ */
 function forwardMesh(conn: Conn, data: RawData) {
   if (conn.role !== 'player') return;
   const frame = Buffer.isBuffer(data) ? Buffer.from(data) : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
-  if (frame.length !== MESH_BYTES || frame.readInt16LE(0) !== MESH_MAGIC) return;
-  frame.writeInt16LE(conn.player.slot, 2);
-  sendToHosts(conn.room, frame, { live: true });
-  conn.room.game.onMesh(conn.player, frame);
+  if (frame.length < 4) return;
+  const magic = frame.readInt16LE(0);
+  if (magic === MESH_MAGIC && frame.length === MESH_BYTES) {
+    frame.writeInt16LE(conn.player.slot, 2);
+    sendToHosts(conn.room, frame, { live: true });
+    conn.room.game.onMesh(conn.player, frame);
+  } else if (magic === CV_MAGIC && frame.length === FULL_BYTES) {
+    frame.writeInt16LE(conn.player.slot, 2);
+    for (const ws of conn.room.cameraHosts) sendLive(ws, frame);
+  }
 }
 
 /** Trims and shortens the name, and adds " 2", " 3"… if someone in the room already has it. */
@@ -138,6 +182,7 @@ function uniqueName(room: Room, raw: string): string {
 function leave(conn: Conn, ws: WebSocket) {
   if (conn.role === 'host') {
     conn.room.hosts.delete(ws);
+    setCameraView(conn.room, ws, false);
     scheduleCleanup(conn.room);
   } else if (conn.role === 'player') {
     conn.room.players.delete(conn.player.id);
@@ -202,6 +247,8 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
       send(ws, { t: 'welcome', room: code, playerId: player.id });
       broadcastRoom(room);
       room.game.syncTo(ws);
+      // Always, so a phone that reconnects stops sending full frames if the view closed meanwhile.
+      send(ws, { t: 'camera_view', on: room.cameraHosts.size > 0 });
       return { role: 'player', room, player };
     }
 
@@ -256,6 +303,10 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
 
     case 'end_round':
       if (conn.role === 'host') conn.room.game.end();
+      return conn;
+
+    case 'camera_view':
+      if (conn.role === 'host') setCameraView(conn.room, ws, Boolean(msg.on));
       return conn;
 
     case 'tts_end':

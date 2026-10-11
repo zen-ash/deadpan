@@ -42,6 +42,8 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
   const [now, setNow] = useState(serverNow);
   useEffect(() => {
     if (!ticking) return;
+    // Catch up at once: the clock stood still between turns.
+    setNow(serverNow());
     const id = setInterval(() => setNow(serverNow()), 250);
     return () => clearInterval(id);
   }, [ticking, serverNow]);

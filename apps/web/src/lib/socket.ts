@@ -15,8 +15,15 @@ export interface SocketHandlers {
   onConnectedChange?: (connected: boolean) => void;
 }
 
+/** What the big screen needs from its connection: the live socket, or demo mode's playback. */
+export interface Link {
+  readonly clock: { now(): number; toServer(local: number): number };
+  send(msg: ClientToServer | HostToServer): void;
+  close(): void;
+}
+
 /** A WebSocket to the game server that reconnects with backoff and keeps the clock synced. */
-export class RoomSocket {
+export class RoomSocket implements Link {
   readonly clock = new ClockSync();
   private ws: WebSocket | null = null;
   private stopped = false;

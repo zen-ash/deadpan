@@ -41,9 +41,11 @@ export function App() {
   if (!code) return <Message title="Bad room code." body="Room codes are 4 letters, like KTXB." />;
 
   if (kind === 'host' && !round) {
+    // ?demo=N plays back round N of this room from its recording (?demo alone means round 1).
+    const demo = new URLSearchParams(location.search).get('demo');
     return (
       <Suspense fallback={<Loading text="Loading the big screen…" />}>
-        <Host code={code} />
+        <Host code={code} demo={demo === null ? undefined : Math.max(1, Math.floor(Number(demo)) || 1)} />
       </Suspense>
     );
   }

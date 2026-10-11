@@ -2,6 +2,8 @@ import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type S
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { HostAudio } from '../host/audio';
+import { CameraView } from '../host/CameraView';
+import { DemoSocket } from '../host/demo';
 import { EvidenceBoard } from '../host/EvidenceBoard';
 import { Interrogation } from '../host/Interrogation';
 import { layoutSuspects, stageArea, type Reserved } from '../host/layout';
@@ -9,7 +11,7 @@ import { live } from '../host/live';
 import { Room, type SuspectView } from '../host/Room';
 import type { CardMoment } from '../host/SuspectCard';
 import { SuspectCards } from '../host/SuspectCards';
-import { RoomSocket } from '../lib/socket';
+import { RoomSocket, type Link, type SocketHandlers } from '../lib/socket';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 /** Height of the lobby's top bar, above "The lineup.". */
@@ -63,8 +65,9 @@ function useViewport() {
   return size;
 }
 
-export function Host({ code }: { code: string }) {
-  const socketRef = useRef<RoomSocket | null>(null);
+/** `demo` plays back that recorded round of the room instead of joining it live. */
+export function Host({ code, demo }: { code: string; demo?: number }) {
+  const socketRef = useRef<Link | null>(null);
   const roundRef = useRef(0);
   /** Every name seen in this room, so players who leave keep theirs on the verdict. */
   const knownNames = useRef(new Map<string, string>());
@@ -83,6 +86,9 @@ export function Host({ code }: { code: string }) {
   const [notice, setNotice] = useState('');
   /** The round shown on the evidence board, if it's open. */
   const [evidence, setEvidence] = useState<number | null>(null);
+  /** The camera view for the computer vision judges; phones send full landmark frames while it's open. */
+  const [cameraView, setCameraView] = useState(false);
+  const cameraViewRef = useRef(false);
   const viewport = useViewport();
   // The suspects fit around these: the lobby's join panel and headline, the round's text block
   // at the top and the evidence chips at the bottom.
@@ -97,8 +103,11 @@ export function Host({ code }: { code: string }) {
   }, [joinUrl]);
 
   useEffect(() => {
-    const socket = new RoomSocket({
-      onOpen: () => socket.send({ t: 'host_join', room: code }),
+    const handlers: SocketHandlers = {
+      onOpen: () => {
+        socket.send({ t: 'host_join', room: code });
+        if (cameraViewRef.current) socket.send({ t: 'camera_view', on: true });
+      },
       onConnectedChange: setConnected,
       onMessage: (msg) => {
         switch (msg.t) {
@@ -153,7 +162,8 @@ export function Host({ code }: { code: string }) {
         }
       },
       onBinary: (data) => live.handleMesh(data),
-    });
+    };
+    const socket: Link = demo ? new DemoSocket(code, demo, handlers) : new RoomSocket(handlers);
     socketRef.current = socket;
     audio.onBlocked = () => setSoundBlocked(true);
     return () => {
@@ -162,7 +172,7 @@ export function Host({ code }: { code: string }) {
       audio.stopLines();
       audio.setRoomTone(false);
     };
-  }, [code, audio]);
+  }, [code, demo, audio]);
 
   // Escape closes the evidence board, like any pop-up.
   useEffect(() => {
@@ -171,6 +181,18 @@ export function Host({ code }: { code: string }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [evidence]);
+
+  const showCameraView = useCallback((on: boolean) => {
+    cameraViewRef.current = on;
+    setCameraView(on);
+    socketRef.current?.send({ t: 'camera_view', on });
+  }, []);
+  useEffect(() => {
+    if (!cameraView || evidence !== null) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && showCameraView(false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cameraView, evidence, showCameraView]);
 
   const enableSound = () => {
     audio.unlock();
@@ -212,7 +234,8 @@ export function Host({ code }: { code: string }) {
     lastAnswer: answers.findLast((a) => a.playerId === p.id),
     benched: inRound && !game?.roundPlayers.includes(p.id),
     // Only players who were in the round get a role; anyone who joined since sits it out.
-    role: revealed && revealed.scores.some((s) => s.playerId === p.id) ? (p.id === revealed.imposterId ? 'imposter' : 'innocent') : undefined,
+    role:
+      revealed && revealed.scores.some((s) => s.playerId === p.id) ? (p.id === revealed.imposterId ? 'imposter' : 'innocent') : undefined,
     stamp: revealed
       ? p.id === revealed.accusedId
         ? revealed.correct
@@ -224,8 +247,8 @@ export function Host({ code }: { code: string }) {
       : undefined,
   }));
 
-  // In the lobby, the empty seats take one more slot in the lineup.
-  const openSeats = inRound ? 0 : MAX_PLAYERS - players.length;
+  // In the lobby, the empty seats take one more slot in the lineup (a replay has no seats to fill).
+  const openSeats = inRound || demo ? 0 : MAX_PLAYERS - players.length;
   const headH = headBox?.height ?? 150;
   const reserved: Reserved = inRound
     ? {
@@ -236,6 +259,16 @@ export function Host({ code }: { code: string }) {
     : { left: (panelBox?.right ?? 0) + 40, top: TOP_BAR_H + headH + TEXT_GAP, bottom: 24 };
   const area = stageArea(viewport, reserved);
   const slots = layoutSuspects(suspects.length + (openSeats > 0 ? 1 : 0), area, inRound, viewport.h);
+  /** One line for the camera view on where the game is. */
+  const cameraStatus = () => {
+    if (!inRound) return players.length === 0 ? 'Lobby' : `Lobby · ${players.length} ${players.length === 1 ? 'phone' : 'phones'}`;
+    if (turn) return `${name(turn.playerId)} ${turn.stage === 'asking' ? 'is being asked' : 'is answering'}`;
+    if (game.phase === 'deal') return 'The deal';
+    if (game.phase === 'verdict')
+      return verdictShown ? `The detective accuses ${name(verdict.accusedId)}` : 'The detective is deliberating';
+    return 'Round in progress';
+  };
+
   // "The lineup." sits just above the faces, centred over them.
   const facesTop = slots.length > 0 ? Math.min(...slots.map((s) => s.faceY - s.faceH / 2)) : area.y;
   const headX = area.x + area.w / 2;
@@ -243,12 +276,30 @@ export function Host({ code }: { code: string }) {
 
   return (
     <main className="host-stage">
-      <Room suspects={suspects} slots={slots} focus={focus} activeId={activeId} calibrating={game?.phase === 'baseline'} />
+      <Room
+        suspects={suspects}
+        slots={slots}
+        focus={focus}
+        activeId={activeId}
+        calibrating={game?.phase === 'baseline'}
+        paused={cameraView}
+      />
       <SuspectCards suspects={suspects} slots={slots} openSeats={openSeats} activeId={activeId} moment={moment} />
 
       <div className="overlay">
         <header className={`top-bar ${inRound ? 'round' : ''}`}>
-          {inRound ? (
+          {inRound && demo ? (
+            // A replay has nobody to join, so the chip says what's playing instead.
+            <aside className="join-chip replay" aria-label="Recorded round">
+              <span className="join-chip-text">
+                <span className="wordmark">DEADPAN</span>
+                <span className="join-chip-code">Replay.</span>
+                <span className="join-chip-status">
+                  Room {code} · round {demo}
+                </span>
+              </span>
+            </aside>
+          ) : inRound ? (
             // During a round the join panel shrinks to this chip, so the faces get the full width.
             <aside className="join-chip" aria-label={`Join room ${code}`}>
               {qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}
@@ -263,72 +314,103 @@ export function Host({ code }: { code: string }) {
               </span>
             </aside>
           ) : (
-            <>
-              <span className="wordmark">DEADPAN</span>
+            <span className="wordmark">DEADPAN</span>
+          )}
+          <nav className="top-actions" aria-label="Round controls">
+            {!inRound && (
               <span className="open-tag">
                 <span className={`live-dot ${connected ? '' : 'bad'}`} />
-                {connected ? `Room ${code} is open` : 'Reconnecting…'}
+                {demo ? `Recorded round · room ${code}` : connected ? `Room ${code} is open` : 'Reconnecting…'}
               </span>
-            </>
-          )}
-          {(inRound || soundBlocked) && (
-            <nav className="top-actions" aria-label="Round controls">
-              {/* Blocked playback needs a click even after sound was turned on once. */}
-              {((!soundOn && inRound) || soundBlocked) && (
-                <button className={`btn ${revealed || !inRound ? 'glass' : 'gold'}`} onClick={enableSound}>
-                  Turn on sound
+            )}
+            {/* Blocked playback needs a click even after sound was turned on once. */}
+            {((!soundOn && inRound) || soundBlocked) && (
+              <button className={`btn ${revealed || !inRound ? 'glass' : 'gold'}`} onClick={enableSound}>
+                Turn on sound
+              </button>
+            )}
+            <button className="btn glass" onClick={() => showCameraView(true)}>
+              Camera view
+            </button>
+            {inRound && game.phase !== 'verdict' && (
+              <button className="btn glass" onClick={() => send('end_round')}>
+                {demo ? 'Stop replay' : 'End round'}
+              </button>
+            )}
+            {/* After the reveal the corner holds what's next, keeping the faces clear. */}
+            {revealed && (
+              <>
+                <button className="btn gold" onClick={() => setEvidence(revealed.round)}>
+                  See the evidence
                 </button>
-              )}
-              {inRound && game.phase !== 'verdict' && (
+                <button className="btn glass" onClick={() => send('start_round')}>
+                  Play again
+                </button>
                 <button className="btn glass" onClick={() => send('end_round')}>
-                  End round
+                  Lobby
                 </button>
-              )}
-              {/* After the reveal the corner holds what's next, keeping the faces clear. */}
-              {revealed && (
-                <>
-                  <button className="btn gold" onClick={() => setEvidence(revealed.round)}>
-                    See the evidence
-                  </button>
-                  <button className="btn glass" onClick={() => send('start_round')}>
-                    Play again
-                  </button>
-                  <button className="btn glass" onClick={() => send('end_round')}>
-                    Lobby
-                  </button>
-                </>
-              )}
-            </nav>
-          )}
+              </>
+            )}
+          </nav>
         </header>
+
+        {!inRound && demo && (
+          <section className="lobby-panel demo" ref={panelRef} aria-label="Demo mode">
+            <p className="eyebrow">Demo mode</p>
+            <p className="demo-title">A recorded round.</p>
+            <p className="demo-text">
+              Room {code}, round {demo}, played back from its saved file: the faces, the signals and the detective's voice, exactly as they
+              happened.
+            </p>
+            <span className="panel-rule" />
+            <p className="suspect-count">{players.length === 0 ? 'Loading the recording…' : `${players.length} suspects`}</p>
+            <button className="btn gold" disabled={players.length === 0} onClick={() => send('start_round')}>
+              Play the round
+            </button>
+          </section>
+        )}
 
         {!inRound && (
           <>
-            <section className="lobby-panel" ref={panelRef} aria-label="Join this room">
-              <p className="eyebrow">Join on your phone</p>
-              <div className="qr-box">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
-              <p className="eyebrow code-label">Room code</p>
-              <p className="room-code">{code}</p>
-              <p className="join-url">
-                <span>{location.host}</span>
-                <wbr />
-                <span>/play/{code}</span>
-              </p>
-              <span className="panel-rule" />
-              <p className="suspect-count">
-                {players.length === 0 ? 'Waiting for suspects…' : `${players.length} of ${MAX_PLAYERS} suspects in the room`}
-              </p>
-              <button className="btn gold" disabled={players.length === 0} onClick={() => send('start_round')}>
-                Start round
-              </button>
-              {players.length === 1 && <p className="panel-note">Imposter needs 2 or more players. One works for testing.</p>}
-              {LOCAL_HOSTS.has(location.hostname) && (
-                <p className="stage-banner">Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.</p>
-              )}
-            </section>
-            <div className="lineup-head" ref={headRef} style={{ transform: `translate(${headX.toFixed(1)}px, ${headY.toFixed(1)}px) translateX(-50%)` }}>
+            {!demo && (
+              <section className="lobby-panel" ref={panelRef} aria-label="Join this room">
+                <p className="eyebrow">Join on your phone</p>
+                <div className="qr-box">{qr && <img src={qr} alt={`QR code for ${joinUrl}`} />}</div>
+                <p className="eyebrow code-label">Room code</p>
+                <p className="room-code">{code}</p>
+                <p className="join-url">
+                  <span>{location.host}</span>
+                  <wbr />
+                  <span>/play/{code}</span>
+                </p>
+                <span className="panel-rule" />
+                <p className="suspect-count">
+                  {players.length === 0 ? 'Waiting for suspects…' : `${players.length} of ${MAX_PLAYERS} suspects in the room`}
+                </p>
+                <button className="btn gold" disabled={players.length === 0} onClick={() => send('start_round')}>
+                  Start round
+                </button>
+                {players.length === 1 && <p className="panel-note">Imposter needs 2 or more players. One works for testing.</p>}
+                {LOCAL_HOSTS.has(location.hostname) && (
+                  <p className="stage-banner">
+                    Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.
+                  </p>
+                )}
+              </section>
+            )}
+            <div
+              className="lineup-head"
+              ref={headRef}
+              style={{ transform: `translate(${headX.toFixed(1)}px, ${headY.toFixed(1)}px) translateX(-50%)` }}
+            >
               <h1 className="lineup-title">The lineup.</h1>
-              <p className="lineup-sub">{players.length === 0 ? 'Scan the code to join.' : 'Start the round when everyone is in.'}</p>
+              <p className="lineup-sub">
+                {demo
+                  ? 'Press play to watch the round.'
+                  : players.length === 0
+                    ? 'Scan the code to join.'
+                    : 'Start the round when everyone is in.'}
+              </p>
             </div>
           </>
         )}
@@ -347,6 +429,10 @@ export function Host({ code }: { code: string }) {
         )}
         {notice && <p className="stage-banner notice">{notice}</p>}
       </div>
+
+      {cameraView && (
+        <CameraView players={players} activeId={activeId} status={cameraStatus()} replay={!!demo} onClose={() => showCameraView(false)} />
+      )}
 
       {evidence !== null && (
         <div className="board-backdrop" onClick={(e) => e.target === e.currentTarget && setEvidence(null)}>

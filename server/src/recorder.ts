@@ -1,12 +1,13 @@
 // Records one round in memory and writes it to rounds/<room>-<round>.json when it ends (SPEC:
 // no database). The evidence board and demo mode read these files. Gemini's dynamic voice lines
 // are copied next to them, so a replay can play them after the in-memory audio has expired.
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   AnswerResult,
   FeaturesPacket,
+  RoundEvent,
   RoundFile,
   RoundSample,
   SfxName,
@@ -26,6 +27,23 @@ export function roundFilePath(room: string, round: number): string {
 
 export function roundAudioPath(id: string): string {
   return resolve(ROUNDS_DIR, 'audio', `${id}.mp3`);
+}
+
+/**
+ * The highest round saved for this room code. A room starts counting from here, so reusing a code
+ * after its room was cleared never overwrites an older recording.
+ */
+export function lastSavedRound(room: string): number {
+  try {
+    let last = 0;
+    for (const file of readdirSync(ROUNDS_DIR)) {
+      const m = file.match(/^([A-Z]{4})-(\d+)\.json$/);
+      if (m?.[1] === room) last = Math.max(last, Number(m[2]));
+    }
+    return last;
+  } catch {
+    return 0;
+  }
 }
 
 export class RoundRecorder {
@@ -53,6 +71,7 @@ export class RoundRecorder {
       lines: [],
       sfx: [],
       verdict: null,
+      events: [],
     };
   }
 
@@ -75,8 +94,16 @@ export class RoundRecorder {
       round4(f.hr.quality),
       f.face.present ? 1 : 0,
       f.voice.vad ? 1 : 0,
+      round4(f.face.blinkPm),
+      round4(f.fps),
     ];
     this.data.samples[playerId]?.push(sample);
+  }
+
+  /** A game message to the big screen, copied as it was at this moment (turn info changes later). */
+  event(msg: RoundEvent) {
+    if (this.closed) return;
+    this.data.events!.push([Date.now(), structuredClone(msg)]);
   }
 
   speech(playerId: string, on: boolean, at: number) {
@@ -139,7 +166,8 @@ export class RoundRecorder {
     this.data.endedAt = Date.now();
     try {
       mkdirSync(resolve(ROUNDS_DIR, 'audio'), { recursive: true });
-      for (const line of this.data.lines) {
+      const spoken = this.data.events!.flatMap(([, e]) => (e.t === 'say' ? [e.line] : []));
+      for (const line of [...this.data.lines, ...spoken]) {
         const base = line.id.split('~')[0]!;
         if (!base.startsWith('d')) continue;
         const audio = dynamicAudio(base);
@@ -147,8 +175,13 @@ export class RoundRecorder {
         if (!existsSync(roundAudioPath(base))) writeFileSync(roundAudioPath(base), audio);
         line.url = `/api/rounds/audio/${base}.mp3`;
       }
-      const file = roundFilePath(this.data.room, this.data.round);
-      writeFileSync(file, JSON.stringify(this.data));
+      let file = roundFilePath(this.data.room, this.data.round);
+      // Never overwrite an older recording; keep this one beside it instead.
+      if (existsSync(file)) {
+        file = file.replace(/\.json$/, `-${Date.now()}.json`);
+        console.warn(`[rounds] ${this.data.room}-${this.data.round}.json already exists`);
+      }
+      writeFileSync(file, JSON.stringify(this.data), { flag: 'wx' });
       return file;
     } catch (err) {
       console.warn('[rounds] could not save the round:', err instanceof Error ? err.message : err);

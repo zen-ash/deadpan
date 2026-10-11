@@ -31,6 +31,8 @@ export interface Room {
   code: string;
   players: Map<string, Player>;
   hosts: Set<WebSocket>;
+  /** Hosts with the camera view open; phones send full landmark frames while there are any. */
+  cameraHosts: Set<WebSocket>;
   game: ImposterGame;
   cleanup?: NodeJS.Timeout;
 }
@@ -42,11 +44,14 @@ export function send(ws: WebSocket, msg: ServerToClient) {
 export function sendToHosts(room: Room, msg: ServerToClient | Buffer, { live = false } = {}) {
   const data = Buffer.isBuffer(msg) ? msg : JSON.stringify(msg);
   for (const ws of room.hosts) {
-    if (ws.readyState !== ws.OPEN) continue;
-    // Live signal frames are dropped for a backed-up host; game messages never are.
-    if (live && ws.bufferedAmount > HOST_BACKLOG_BYTES) continue;
-    ws.send(data);
+    if (live) sendLive(ws, data);
+    else if (ws.readyState === ws.OPEN) ws.send(data);
   }
+}
+
+/** Live signal frames are dropped for a backed-up host; game messages never are. */
+export function sendLive(ws: WebSocket, data: Buffer | string) {
+  if (ws.readyState === ws.OPEN && ws.bufferedAmount <= HOST_BACKLOG_BYTES) ws.send(data);
 }
 
 /** To every host and every phone in the room. */

@@ -17,6 +17,21 @@ export const MESH_MAGIC = 0x4d31;
 export const MESH_HEADER = 2;
 export const MESH_QUANT = 16384;
 
+/**
+ * While the big screen's camera view is open, phones also send every landmark (FACE_LANDMARK_COUNT
+ * in @deadpan/shared/face) where it sits in the camera frame: [CV_MAGIC, slot, x0, y0, z0, …], with
+ * x and y as fractions of the frame's width and height and z on x's scale, times CV_QUANT.
+ */
+export const CV_MAGIC = 0x4d32;
+export const CV_QUANT = 30000;
+
+/** Skin patches the camera heart rate is read from: above the brows, and the middle of each cheek. */
+export const PULSE_REGIONS: readonly (readonly number[])[] = [
+  [151, 108, 337, 107, 336, 9],
+  [50, 101, 118, 117, 123, 187, 205, 36],
+  [280, 330, 347, 346, 352, 411, 425, 266],
+];
+
 // No I or O, so codes read cleanly off a screen.
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 export const ROOM_CODE_LENGTH = 4;
@@ -72,6 +87,31 @@ export interface VoiceFeatures {
   rms: number;
 }
 
+/** How the phone's vision pipeline is doing, for the big screen's camera view. */
+export interface VisionStats {
+  /** Face tracking time per frame, in ms. */
+  inferMs: number;
+  gpu: boolean;
+  /** Camera frame size in pixels. */
+  frameW: number;
+  frameH: number;
+  /** Eye aspect ratio: the lowest in the last 100 ms (so blinks show), and this player's open-eye level. */
+  ear: number;
+  earOpen: number;
+  /** The blink detector sees the eyes shut right now. */
+  eyesClosed: boolean;
+  /** Length of the latest blink, in ms (0 before the first). */
+  lastBlinkMs: number;
+  /** Share of the last 30 s with the eyes shut (PERCLOS, the usual drowsiness measure), 0–1. */
+  perclos: number;
+  /** Head pose in degrees: turn, nod (positive is up) and tilt. */
+  yaw: number;
+  pitch: number;
+  roll: number;
+  /** The speech detector: Silero's neural VAD, or the loudness fallback. */
+  vad: 'silero' | 'rms' | 'loading';
+}
+
 export interface FeaturesPacket {
   ts: number;
   /** Face tracking frames per second on the phone. */
@@ -79,6 +119,8 @@ export interface FeaturesPacket {
   face: FaceFeatures;
   voice: VoiceFeatures;
   hr: { bpm: number | null; quality: number };
+  /** Missing until the face tracker has loaded. */
+  vision?: VisionStats;
 }
 
 export type TurnKind = 'baseline' | 'question' | 'followup';
@@ -218,7 +260,9 @@ export type HostToServer =
   | { t: 'tts_end'; lineId: string; at: number }
   | { t: 'start_round' }
   /** Back to the lobby: after the verdict, or to abandon a round. */
-  | { t: 'end_round' };
+  | { t: 'end_round' }
+  /** The camera view opened or closed; phones send full landmark frames while any host has it open. */
+  | { t: 'camera_view'; on: boolean };
 
 export type ErrorCode = 'bad_room' | 'bad_name' | 'room_full' | 'bad_message' | 'not_ready';
 
@@ -234,6 +278,8 @@ export type ServerToClient =
   | { t: 'scribe'; turnId: string; url: string }
   | { t: 'your_turn'; turnId: string; questionEnd: number }
   | { t: 'turn_over'; turnId: string }
+  // To phones: start or stop sending full landmark frames (CV_MAGIC).
+  | { t: 'camera_view'; on: boolean }
   | ({ t: 'verdict' } & Verdict)
   // To hosts only.
   | { t: 'say'; line: SpokenLine }
@@ -248,9 +294,13 @@ export type ServerToClient =
 
 /**
  * One 10 Hz signal sample: [t, pitchHz or -1, rms, blinkCount, lipPress, brow, gazeOff, headMotion,
- * heart bpm or -1, heart quality, face present (0/1), speaking (0/1)].
+ * heart bpm or -1, heart quality, face present (0/1), speaking (0/1), blinks per minute, face fps].
+ * The last two are missing from rounds recorded before demo mode.
  */
-export type RoundSample = [number, number, number, number, number, number, number, number, number, number, number, number];
+export type RoundSample = [number, number, number, number, number, number, number, number, number, number, number, number, number?, number?];
+
+/** The game messages the big screen got during the round, which demo mode plays back in time. */
+export type RoundEvent = Extract<ServerToClient, { t: 'state' | 'say' | 'sfx' | 'answer' | 'verdict' | 'live_transcript' }>;
 
 export interface RoundTurn {
   id: string;
@@ -288,4 +338,6 @@ export interface RoundFile {
   lines: RoundLine[];
   sfx: { name: SfxName; at: number }[];
   verdict: Verdict | null;
+  /** Every game message sent to the big screen, with its server time. Missing before demo mode. */
+  events?: [number, RoundEvent][];
 }
