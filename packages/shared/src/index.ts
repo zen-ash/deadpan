@@ -51,9 +51,13 @@ export function normalizeRoomCode(raw: string): string | null {
 
 export type Phase = 'lobby' | 'baseline' | 'deal' | 'question' | 'followup' | 'verdict' | 'replay';
 
-// Turn timing (SPEC: an answer ends on "done", after 2.5 s of silence, or at a 15 s cap).
+// Turn timing: an answer ends on "done", after a stretch of silence, or at a 15 s cap.
 export const ANSWER_CAP_MS = 15_000;
-export const SILENCE_END_MS = 2_500;
+/**
+ * SPEC said 2.5 s, but in playtests half the answers that ended on silence were people pausing to
+ * think (2.6–5.4 s) who then kept talking, and a long pause is just what the detective wants to hear.
+ */
+export const SILENCE_END_MS = 6_000;
 /** Speech this soon after the question ends is the question's echo, not an answer. */
 export const MIN_RESPONSE_MS = 200;
 export const DEAL_MS = 6_000;
