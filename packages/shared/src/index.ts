@@ -66,7 +66,11 @@ export const ANSWER_CAP_MS = 15_000;
  * think (2.6–5.4 s) who then kept talking, and a long pause is just what the detective wants to hear.
  */
 export const SILENCE_END_MS = 6_000;
-/** Speech this soon after the question ends is the question's echo, not an answer. */
+/**
+ * Speech this soon after the question ends is usually the question's echo, not an answer. It still
+ * counts as the answer when the phone heard nothing at the end of the question (see answerStartsFrom
+ * in server/src/scoring.ts): some people start talking the instant the detective stops.
+ */
 export const MIN_RESPONSE_MS = 200;
 export const DEAL_MS = 6_000;
 
@@ -217,6 +221,7 @@ export interface AnswerMetrics {
 /** z-scores against the player's own baseline; positive means further from calm. */
 export interface AnswerZ {
   rt: number | null;
+  /** Only a rise counts; a voice lower than calm is 0. */
   pitch: number | null;
   /** Pauses, fillers and slower speech combined; this is what the delivery score weighs. */
   hesitation: number | null;

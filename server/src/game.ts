@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import {
   ANSWER_CAP_MS,
   DEAL_MS,
-  MIN_RESPONSE_MS,
   SILENCE_END_MS,
   TRUTHS_QUESTIONS,
   type AnswerResult,
@@ -54,7 +53,17 @@ import {
 } from './lines';
 import { lastSavedRound, logRound, RoundRecorder } from './recorder';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
-import { answerMetrics, buildBaseline, localTruthsVerdict, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
+import {
+  answerMetrics,
+  answerStartsFrom,
+  buildBaseline,
+  localTruthsVerdict,
+  localVerdict,
+  meanDelivery,
+  scoreAnswer,
+  type Baseline,
+  type Window,
+} from './scoring';
 import { scribeUrl } from './scribe';
 import { pickWord, shuffled } from './words';
 
@@ -550,7 +559,7 @@ export class Game {
     const turn = this.turn;
     if (!turn || turn.info.playerId !== player.id || turn.info.stage !== 'answering') return;
     if (on) {
-      if (at < turn.info.questionEnd! + MIN_RESPONSE_MS) return;
+      if (at < answerStartsFrom(player.samples, turn.info.questionEnd!)) return;
       turn.heardSpeech = true;
       clearTimeout(turn.silenceTimer);
     } else if (turn.heardSpeech) {

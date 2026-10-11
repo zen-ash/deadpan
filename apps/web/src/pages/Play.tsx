@@ -21,6 +21,12 @@ type FaceState = 'loading' | 'found' | 'lost' | 'failed';
 const NAME_KEY = 'deadpan:name';
 /** Mic levels of exactly zero for this many 1 s checks in a row: the track went silent (an iOS bug). */
 const SILENT_CHECKS = 5;
+/**
+ * Audio below this rate means a Bluetooth headset is the mic (AirPods ran at 24 kHz in a playtest;
+ * the phone's own mic gives 44.1 or 48 kHz). Its call-quality sound makes the pitch tracker jump octaves.
+ */
+const HEADSET_RATE = 32_000;
+const HEADSET_NAME = /airpods|bluetooth|headset|headphone|buds|beats/i;
 
 interface Resume {
   id: string;
@@ -90,6 +96,8 @@ export function Play({ code }: { code: string }) {
   const [audioAsleep, setAudioAsleep] = useState(false);
   /** The mic track looks fine but only delivers silence. */
   const [micSilent, setMicSilent] = useState(false);
+  /** A Bluetooth headset (AirPods) is the mic: its call-quality audio throws pitch readings off. */
+  const [headset, setHeadset] = useState(false);
   const [signals, setSignals] = useState<PhoneSignals | null>(null);
   const [showDebug, setShowDebug] = useState(() => new URLSearchParams(location.search).get('debug') === '1');
   /** During a round only the health dot shows; tapping it shows the details. */
@@ -248,6 +256,10 @@ export function Play({ code }: { code: string }) {
     if (stage !== 'live' || !media) return;
     const { audioCtx, analyser } = media;
     const tracks = [media.stream.getVideoTracks()[0], media.stream.getAudioTracks()[0]];
+    // The phone's own mic runs the audio at 44.1 or 48 kHz; AirPods in call mode drop it to 24 kHz
+    // or less. The rate is fixed until the page reloads, so taking them out needs a reload.
+    const onHeadset = audioCtx.sampleRate < HEADSET_RATE || HEADSET_NAME.test(tracks[1]?.label ?? '');
+    setHeadset(onHeadset);
 
     // A live mic is never exactly silent; a run of all-zero frames means the track died quietly.
     const silenceBuffer = new Float32Array(analyser.fftSize);
@@ -295,7 +307,9 @@ export function Play({ code }: { code: string }) {
       const micRate = tracks[1]?.getSettings().sampleRate;
       socketRef.current?.send({
         t: 'diag',
-        msg: `audio: context ${audioCtx.state} at ${audioCtx.sampleRate} Hz, mic ${micRate ?? '?'} Hz, peak ${peakDb.toFixed(1)} dBFS in first 4 s`,
+        msg:
+          `audio: context ${audioCtx.state} at ${audioCtx.sampleRate} Hz, mic ${micRate ?? '?'} Hz, peak ${peakDb.toFixed(1)} dBFS in first 4 s` +
+          (onHeadset ? ', headset' : ''),
       });
     }, 4000);
 
@@ -527,6 +541,15 @@ export function Play({ code }: { code: string }) {
         <section className="phone-main waiting">
           {serverError && <p className="banner bad">{serverError}</p>}
           {problems}
+          {/* Only before a round: during one there's no room for it under the Done ring. */}
+          {headset && (
+            <>
+              <p className="banner warn">Headphones on? Take them out so the detective hears your phone’s own mic, then reload.</p>
+              <button className="btn black stuck" onClick={() => location.reload()}>
+                Reload
+              </button>
+            </>
+          )}
           {me ? (
             <>
               <h1 className="phone-title waiting-title">You’re in, {me.name}.</h1>

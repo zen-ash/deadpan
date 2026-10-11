@@ -25,6 +25,18 @@ const FILLERS = new Set(['um', 'umm', 'uh', 'uhh', 'uhm', 'erm', 'er', 'hmm', 'm
  */
 const FILLER_LIKE = /(?:,|^|[.!?])\s*like\s*,/gi;
 const Z_LIMIT = 3;
+/** How far back from the end of the question to look for its echo on the player's mic. */
+const ECHO_CHECK_MS = 600;
+/** Speech detected this little before the question ends still counts as an instant answer (clock jitter). */
+const EARLY_SLACK_MS = 100;
+/** An answer needs this many pitch readings for its pitch to count. */
+const MIN_VOICED = 3;
+/**
+ * A pitch reading this many semitones from the player's calm pitch (or, before there is one, from
+ * the answer's own middle) is the tracker jumping an octave, not the voice. Nerves move a voice a few
+ * semitones; an octave is 12.
+ */
+const OCTAVE_JUMP_ST = 9;
 
 /**
  * Typical answer-to-answer spread for each feature. One or two baseline answers can't give a
@@ -38,6 +50,12 @@ const PRIOR = { rtMs: 1100, fillerRate: 0.03, pauseRatio: 0.15, wordsPerSec: 2.6
  * was their turn, not that they're slow. Those don't count towards the baseline response time.
  */
 const MISSED_TURN_MS = 3000;
+/**
+ * The calm response time is at least this. Some people start answering an easy calibration
+ * question the instant the detective stops (0.02 s in a playtest); measured against that, every
+ * ordinary answer would look slow.
+ */
+const MIN_BASELINE_RT_MS = 400;
 
 export interface Window {
   start: number;
@@ -74,6 +92,21 @@ const semitones = (hz: number, ref: number) => 12 * Math.log2(hz / ref);
 
 const inWindow = (samples: Sample[], w: Window) => samples.filter((s) => s.at >= w.start && s.at <= w.end);
 
+/**
+ * The earliest moment speech can count as the start of an answer. Speech in the first
+ * MIN_RESPONSE_MS is normally the detective's voice echoing into the phone, but a quick answerer
+ * starts that soon too. If the phone heard nothing in the last ECHO_CHECK_MS of the question, there
+ * was no echo to hear, so the answer counts from the moment the question ended.
+ */
+export function answerStartsFrom(samples: Sample[], questionEnd: number): number {
+  for (let i = samples.length - 1; i >= 0; i--) {
+    const s = samples[i]!;
+    if (s.at < questionEnd - ECHO_CHECK_MS) break;
+    if (s.at <= questionEnd && s.f.voice.vad) return questionEnd + MIN_RESPONSE_MS;
+  }
+  return questionEnd - EARLY_SLACK_MS;
+}
+
 /** Measures one answer from the player's signal history and Scribe's words. */
 export function answerMetrics(
   samples: Sample[],
@@ -88,11 +121,11 @@ export function answerMetrics(
 
   // Response time: the first speech onset that isn't the question's own echo. Scribe's first
   // word stands in when the phone's speech detector missed the start.
-  const earliest = window.start + MIN_RESPONSE_MS;
+  const earliest = answerStartsFrom(samples, window.start);
   const onset = speech.find((e) => e.on && e.at >= earliest && e.at <= window.end)?.at;
   const firstWord = answerWords.find((w) => w.start >= earliest)?.start;
   const start = onset ?? firstWord;
-  const rtMs = start !== undefined ? start - window.start : null;
+  const rtMs = start !== undefined ? Math.max(0, start - window.start) : null;
 
   // Pauses: gaps of 300 ms or more between words, or between speech segments without words.
   let pauseCount: number | null = null;
@@ -135,8 +168,10 @@ export function answerMetrics(
 
   // Frame-level signals over the answer.
   const frames = inWindow(samples, window);
-  const voiced = frames.map((s) => s.f.voice.pitchHz).filter((p): p is number => p !== null);
-  const pitchHz = voiced.length >= 3 ? median(voiced) : null;
+  const readings = frames.map((s) => s.f.voice.pitchHz).filter((p): p is number => p !== null);
+  const reference = baselinePitchHz ?? median(readings);
+  const voiced = reference === null ? [] : readings.filter((p) => Math.abs(semitones(p, reference)) < OCTAVE_JUMP_ST);
+  const pitchHz = voiced.length >= MIN_VOICED ? median(voiced) : null;
   const withFace = frames.filter((s) => s.f.face.present);
   const lipPress = withFace.length >= 5 ? mean(withFace.map((s) => s.f.face.lipPress)) : null;
   let blinkPm: number | null = null;
@@ -169,6 +204,8 @@ function pauseRatio(m: AnswerMetrics): number | null {
   return m.pauseMs !== null && m.durationMs > 0 ? m.pauseMs / m.durationMs : null;
 }
 
+const atLeast = (s: Stat, min: number): Stat => ({ ...s, mean: Math.max(s.mean, min) });
+
 function stat(values: (number | null)[], prior: number, minScale: number): Stat {
   const xs = values.filter((v): v is number => v !== null);
   return { mean: xs.length > 0 ? mean(xs) : prior, scale: Math.max(std(xs), minScale) };
@@ -191,7 +228,7 @@ export function buildBaseline(answers: AnswerMetrics[], samples: Sample[], windo
     .map((s) => s.f.face.lipPress);
 
   return {
-    rt: stat(answers.map((a) => (a.rtMs !== null && a.rtMs <= MISSED_TURN_MS ? a.rtMs : null)), PRIOR.rtMs, MIN_SCALE.rtMs),
+    rt: atLeast(stat(answers.map((a) => (a.rtMs !== null && a.rtMs <= MISSED_TURN_MS ? a.rtMs : null)), PRIOR.rtMs, MIN_SCALE.rtMs), MIN_BASELINE_RT_MS),
     pitchHz: voiced.length >= 5 ? median(voiced) : null,
     fillerRate: stat(answers.map(fillerRate), PRIOR.fillerRate, MIN_SCALE.fillerRate),
     pauseRatio: stat(answers.map(pauseRatio), PRIOR.pauseRatio, MIN_SCALE.pauseRatio),
@@ -218,7 +255,9 @@ export function scoreAnswer(m: AnswerMetrics, b: Baseline): { z: AnswerZ; delive
   const blink = z(m.blinkPm, b.blink);
   const scores: AnswerZ = {
     rt: z(m.rtMs, b.rt),
-    pitch: m.pitchShiftSt === null ? null : clampZ(m.pitchShiftSt / MIN_SCALE.pitchSt),
+    // Only a rise counts. A lower voice isn't a sign of calm, and one short calibration answer often
+    // catches only the high start of someone's sentences, which made every later answer read low.
+    pitch: m.pitchShiftSt === null ? null : clampZ(Math.max(0, m.pitchShiftSt) / MIN_SCALE.pitchSt),
     hesitation: hesitationParts.length > 0 ? clampZ(mean(hesitationParts)) : null,
     pauses,
     fillers,
