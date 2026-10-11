@@ -1,11 +1,14 @@
 // The big screen's sound: the detective's lines (streamed MP3s, played in order) and the sound
 // effects and room tone (decoded once, played through Web Audio). Browsers only allow sound after
-// a click, so unlock() runs from the Start round button.
+// a click, so unlock() runs from the Start round button. In a live round a line that won't play is
+// read by the laptop voice; a replay's lines are all recorded, so it waits longer and never does.
 import { SFX_NAMES, type SfxName, type SpokenLine } from '@deadpan/shared';
 import { speakLine } from './speech';
 
 /** A line that hasn't started playing after this long is read by the laptop voice instead. */
 const STALL_MS = 4000;
+/** A replay waits longer for its recorded audio, then shows the line as subtitles only. */
+const REPLAY_STALL_MS = 8000;
 /** A line whose playback stops moving for this long (a stream that hung) is skipped, so it can't block the lines after it. */
 const STUCK_MS = 5000;
 const SFX_GAIN = 0.8;
@@ -30,8 +33,14 @@ export class HostAudio {
   private readonly queue: Queued[] = [];
   private current: { item: Queued; finish: () => void; stop: () => void } | null = null;
 
-  constructor() {
+  /** `replay`: playing back a recording (demo mode), which never falls back to the laptop voice. */
+  constructor(private readonly replay = false) {
     this.el.preload = 'auto';
+  }
+
+  /** Fetches a replay's lines ahead of time, so each one starts as soon as its moment comes. */
+  preload(urls: string[]) {
+    for (const url of new Set(urls)) void fetch(url, { signal: AbortSignal.timeout(30_000) }).catch(() => {});
   }
 
   /** Call from a click: lets the page play sound from now on, and loads the sound effects. */
@@ -99,6 +108,8 @@ export class HostAudio {
     const item = this.queue.shift();
     if (!item) return;
     let finished = false;
+    /** The line switched to its fallback; that happens at most once. */
+    let fellBack = false;
     let stall: number | undefined;
     let lastTime = -1;
     let lastMoveAt = Date.now();
@@ -123,15 +134,20 @@ export class HostAudio {
       item.onEnd(Date.now());
       if (!this.current) this.next();
     };
-    // The audio couldn't play (ElevenLabs down, network, autoplay): read the line aloud instead.
+    // The audio couldn't play (ElevenLabs down, network, autoplay): read the line aloud instead,
+    // or in a replay just give it the time it would take (the subtitles still show).
     const fallback = () => {
-      if (finished) return;
+      if (finished || fellBack) return;
+      fellBack = true;
       clearTimeout(stall);
       clearInterval(watch);
       this.el.onended = null;
       this.el.onerror = null;
-      this.el.pause();
-      void speakLine(item.line.text).then(finish);
+      this.el.onplaying = null;
+      // Drop the half-loaded audio, so it can't start late and talk over the fallback.
+      this.el.removeAttribute('src');
+      this.el.load();
+      void speakLine(item.line.text, { aloud: !this.replay }).then(finish);
     };
     // Dropped without reporting an end: the round it belonged to is over.
     const stop = () => {
@@ -144,8 +160,11 @@ export class HostAudio {
     this.el.onerror = fallback;
     this.el.onplaying = () => clearTimeout(stall);
     this.el.src = item.line.url;
-    stall = window.setTimeout(fallback, STALL_MS);
+    stall = window.setTimeout(fallback, this.replay ? REPLAY_STALL_MS : STALL_MS);
     this.el.play().catch((err: unknown) => {
+      // A pending play cut short by our own pause or the next line isn't a failure. (Treating it
+      // as one used to start the laptop voice twice, and the second copy talked over the next line.)
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       if (err instanceof DOMException && err.name === 'NotAllowedError') this.onBlocked?.();
       fallback();
     });

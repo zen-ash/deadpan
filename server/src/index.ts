@@ -45,6 +45,15 @@ app.get('/api/admin/rounds', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json({ rounds: listRounds(), log: readRoundLog() });
 });
+// The detective's recorded Gemini lines for replays. It must come before the route below, which
+// would otherwise take "audio" for a room code and refuse it.
+app.get('/api/rounds/audio/:file', (req, res) => {
+  const id = String(req.params.file).replace(/\.mp3$/, '');
+  if (!/^d[0-9a-f]{16}$/.test(id) || !existsSync(roundAudioPath(id))) return void res.status(404).end();
+  // Each id is one recorded line that never changes, so browsers can keep it.
+  res.type('audio/mpeg').setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(roundAudioPath(id));
+});
 // Round recordings for the evidence board and demo mode: the live round from memory (with
 // X-Round-Saved: 0 until it's complete), older ones from rounds/.
 app.get('/api/rounds/:room/:round', (req, res) => {
@@ -59,11 +68,6 @@ app.get('/api/rounds/:room/:round', (req, res) => {
   const file = roundFilePath(code, round);
   if (!existsSync(file)) return void res.status(404).json({ error: 'No recording of that round.' });
   res.type('application/json').sendFile(file);
-});
-app.get('/api/rounds/audio/:file', (req, res) => {
-  const id = String(req.params.file).replace(/\.mp3$/, '');
-  if (!/^d[0-9a-f]{16}$/.test(id) || !existsSync(roundAudioPath(id))) return void res.status(404).end();
-  res.type('audio/mpeg').sendFile(roundAudioPath(id));
 });
 
 const server = createServer(app);

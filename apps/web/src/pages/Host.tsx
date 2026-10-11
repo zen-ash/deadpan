@@ -79,7 +79,7 @@ export function Host({ code, demo, back }: HostProps) {
   const roundRef = useRef(0);
   /** Every name seen in this room, so players who leave keep theirs on the verdict. */
   const knownNames = useRef(new Map<string, string>());
-  const [audio] = useState(() => new HostAudio());
+  const [audio] = useState(() => new HostAudio(!!demo));
   const [soundOn, setSoundOn] = useState(false);
   const [soundBlocked, setSoundBlocked] = useState(false);
   /** What the detective is saying right now, for subtitles. */
@@ -176,7 +176,7 @@ export function Host({ code, demo, back }: HostProps) {
       },
       onBinary: (data) => live.handleMesh(data),
     };
-    const socket: Link = demo ? new DemoSocket(code, demo, handlers) : new RoomSocket(handlers);
+    const socket: Link = demo ? new DemoSocket(code, demo, handlers, (urls) => audio.preload(urls)) : new RoomSocket(handlers);
     socketRef.current = socket;
     audio.onBlocked = () => setSoundBlocked(true);
     return () => {

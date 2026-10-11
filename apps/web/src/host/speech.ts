@@ -15,9 +15,10 @@ function pickVoice(): SpeechSynthesisVoice | null {
 
 /**
  * Speaks a line and resolves when it has finished (or failed). Always resolves within a timeout
- * based on the line's length, so a stuck or blocked synthesizer can't stall the round.
+ * based on the line's length, so a stuck or blocked synthesizer can't stall the round. With
+ * `aloud: false` it only waits about as long as speaking it would take.
  */
-export function speakLine(text: string): Promise<void> {
+export function speakLine(text: string, { aloud = true } = {}): Promise<void> {
   return new Promise((resolve) => {
     const words = text.split(/\s+/).length;
     // Speaking can't plausibly take less than this; an earlier "end" is a browser glitch.
@@ -32,7 +33,7 @@ export function speakLine(text: string): Promise<void> {
     };
     const timeout = setTimeout(finish, Math.max(2000, words * 450) + 2000);
 
-    if (!('speechSynthesis' in window)) {
+    if (!aloud || !('speechSynthesis' in window)) {
       // No voice at all: wait roughly as long as reading the line aloud would take.
       clearTimeout(timeout);
       setTimeout(finish, Math.max(1500, words * 380));

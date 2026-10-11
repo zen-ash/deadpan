@@ -53,6 +53,8 @@ export class DemoSocket implements Link {
     private readonly room: string,
     private readonly round: number,
     private readonly handlers: SocketHandlers,
+    /** Called once the recording is loaded, with every line's audio, so it can be fetched ahead. */
+    private readonly onLines?: (urls: string[]) => void,
   ) {
     this.timer = window.setInterval(this.tick, TICK_MS);
     void this.load();
@@ -76,6 +78,7 @@ export class DemoSocket implements Link {
       if (!file.events?.length) throw new Error('That round was recorded before demo mode existed. Record a new one.');
       if (this.stopped) return;
       this.file = file;
+      this.onLines?.(file.events!.flatMap(([, e]) => (e.t === 'say' ? [e.line.url] : [])));
       this.tracks = file.players.map((p) => ({
         id: p.id,
         slot: p.slot,
