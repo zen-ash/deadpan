@@ -15,7 +15,7 @@ A party bluff game where your phone reads your face and voice, and an AI detecti
 - **Track:** Creative
 - **Side challenges (3):**
   - Best Use of ElevenLabs
-  - Best Use of Gemini
+  - Best Use of Gemini API
   - Mercedes: Best Application of Computer Vision
 
 [Check the challenge names against the exact wording in the Devpost form.]
