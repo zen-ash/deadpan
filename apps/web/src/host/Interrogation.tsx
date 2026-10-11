@@ -13,8 +13,6 @@ interface Props {
   name(id: string): string;
   /** The text block at the top, measured so the faces sit below it. */
   stageRef?: Ref<HTMLDivElement>;
-  /** The evidence chips along the bottom, measured so the cards sit above them. */
-  dockRef?: Ref<HTMLUListElement>;
 }
 
 /** The end of a long transcript, so the latest words stay on one line. */
@@ -72,7 +70,7 @@ function sourceText(v: Verdict): string {
 }
 
 /** The big screen's overlay during a round: who's asked, the detective's line, the timer and the verdict. */
-export function Interrogation({ game, verdict, line, transcript, serverNow, name, stageRef, dockRef }: Props) {
+export function Interrogation({ game, verdict, line, transcript, serverNow, name, stageRef }: Props) {
   const turn = game.turn;
   const ticking = game.phase === 'deal' || turn?.stage === 'answering';
   const [now, setNow] = useState(serverNow);
@@ -85,87 +83,62 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
   }, [ticking, serverNow]);
   const msUntil = (t: number | null) => (t === null ? null : Math.max(0, t - now));
 
-  if (game.phase === 'verdict' && verdict?.mode === 'truths' && game.verdictStage !== 'deliberating') {
-    // Each card shows the detective's pick (and later the real lie), so the text block stays short.
-    const accusing = game.verdictStage === 'accusing';
-    return (
-      <>
-        <div className="stage verdict" ref={stageRef}>
-          <p className="stage-eyebrow">Verdict · Round {game.round}</p>
-          {accusing ? (
-            <>
-              <p className="accused-kicker">The detective names the lies</p>
-              {line && <p className="accused-line">“{line.text}”</p>}
-            </>
-          ) : (
-            <>
-              <h1 className="verdict-title">{truthsTitle(verdict)}</h1>
-              <p className="verdict-text">{truthsText(verdict, name)}</p>
-              <p className="verdict-source">{sourceText(verdict)}</p>
-            </>
-          )}
-        </div>
-        {/* With 5 or 6 players the reasons would stack three rows deep; the picks are on the cards anyway. */}
-        {accusing && verdict.picks.length > 0 && verdict.picks.length <= 4 && (
-          <ul className="chips-dock" ref={dockRef}>
-            {verdict.picks.map((p, i) => (
-              <li key={p.playerId} style={{ animationDelay: `${0.4 + i * 0.9}s` }}>
-                {name(p.playerId)}, question {p.picked}: {p.why}
-              </li>
-            ))}
-          </ul>
-        )}
-      </>
-    );
-  }
-
   if (game.phase === 'verdict') {
-    const shown = game.verdictStage !== 'deliberating' && verdict?.mode !== 'truths' && verdict;
+    const stage = verdict ? (game.verdictStage ?? 'deliberating') : 'deliberating';
+    const truths = verdict?.mode === 'truths' ? verdict : null;
+    const imposter = verdict && verdict.mode !== 'truths' ? verdict : null;
+    // The evidence, shown one chip at a time while the accusation is spoken. With 5 or 6 players the
+    // lie picks are on the cards instead: their reasons wouldn't fit in two rows.
+    const chips = truths
+      ? truths.picks.length <= 4
+        ? truths.picks.map((p) => `${name(p.playerId)}, question ${p.picked}: ${p.why}`)
+        : []
+      : (imposter?.evidence ?? []);
+    const eyebrow = stage === 'accusing' ? (truths ? 'The detective names' : 'The detective accuses') : `Verdict · Round ${game.round}`;
     return (
-      <>
-        <div className="stage verdict" ref={stageRef}>
-          <p className="stage-eyebrow">Verdict · Round {game.round}</p>
-          {!shown && <h1 className="stage-line">{line ? `“${line.text}”` : 'The detective is deliberating.'}</h1>}
+      <div className="stage verdict" ref={stageRef}>
+        <p className="stage-eyebrow">{eyebrow}</p>
+        {/* The drumroll, the accusation and the reveal share one box, as tall as the accusation (whose
+            parts have fixed heights), so the faces and cards keep their size through the whole verdict. */}
+        <div className="verdict-frame">
+          <div className={`verdict-slide ${stage === 'deliberating' ? 'on' : ''}`}>
+            <h1 className="stage-line">{stage === 'deliberating' && line ? `“${line.text}”` : 'The detective is deliberating.'}</h1>
+          </div>
 
-          {shown && game.verdictStage === 'accusing' && (
-            <>
-              <p className="accused-kicker">The detective accuses</p>
-              <h1 className="accused-name">{withPeriod(name(verdict.accusedId))}</h1>
-              {line && <p className="accused-line">“{line.text}”</p>}
-            </>
-          )}
+          <div className={`verdict-slide ${stage === 'accusing' ? 'on' : ''}`}>
+            <h1 className="accused-name">{imposter ? withPeriod(name(imposter.accusedId)) : truths ? 'The lies.' : '\u00a0'}</h1>
+            <p className="accused-line">{stage === 'accusing' && line ? `“${line.text}”` : ''}</p>
+            <ul className="verdict-chips">
+              {stage === 'accusing' &&
+                chips.map((c, i) => (
+                  <li key={c} title={c} style={{ animationDelay: `${0.4 + i * 0.9}s` }}>
+                    <span>{c}</span>
+                  </li>
+                ))}
+            </ul>
+          </div>
 
-          {shown && game.verdictStage === 'revealed' && (
-            <>
-              <h1 className="verdict-title">{verdict.correct ? 'Caught.' : 'Escaped.'}</h1>
-              <p className="verdict-text">
-                {verdict.correct ? (
-                  <>
-                    The detective accused {name(verdict.accusedId)}, and {name(verdict.imposterId)} was the imposter.
-                  </>
-                ) : (
-                  <>
-                    The detective accused {name(verdict.accusedId)}, but {name(verdict.imposterId)} was the imposter.
-                  </>
-                )}{' '}
-                The word was <span className="word">{verdict.word}</span>.
-              </p>
-              <p className="verdict-source">{sourceText(verdict)}</p>
-            </>
-          )}
+          <div className={`verdict-slide ${stage === 'revealed' ? 'on' : ''}`}>
+            {truths && (
+              <>
+                <h1 className="verdict-title">{truthsTitle(truths)}</h1>
+                <p className="verdict-text">{truthsText(truths, name)}</p>
+                <p className="verdict-source">{sourceText(truths)}</p>
+              </>
+            )}
+            {imposter && (
+              <>
+                <h1 className="verdict-title">{imposter.correct ? 'Caught.' : 'Escaped.'}</h1>
+                <p className="verdict-text">
+                  The detective accused {name(imposter.accusedId)}, {imposter.correct ? 'and' : 'but'} {name(imposter.imposterId)} was the
+                  imposter. The word was <span className="word">{imposter.word}</span>.
+                </p>
+                <p className="verdict-source">{sourceText(imposter)}</p>
+              </>
+            )}
+          </div>
         </div>
-
-        {/* The detective's evidence appears one chip at a time while the accusation is spoken. */}
-        {shown && game.verdictStage === 'accusing' && verdict.evidence.length > 0 && (
-          <ul className="chips-dock" ref={dockRef}>
-            {verdict.evidence.map((e, i) => (
-              <li key={e} style={{ animationDelay: `${0.4 + i * 0.9}s` }}>
-                {e}
-              </li>
-            ))}
-          </ul>
-        )}
-      </>
+      </div>
     );
   }
 

@@ -112,12 +112,11 @@ export function Host({ code, demo, back }: HostProps) {
   /** Which game "Start round" plays. */
   const [mode, setMode] = useState<GameMode>(loadMode);
   const viewport = useViewport();
-  // The suspects fit around these: the lobby's join panel and headline, the round's text block
-  // at the top and the evidence chips at the bottom.
+  // The suspects fit around these: the lobby's join panel and headline, and the round's text block
+  // at the top (which holds the evidence chips during the accusation).
   const [panelRef, panelBox] = useBox<HTMLElement>();
   const [headRef, headBox] = useBox<HTMLDivElement>();
   const [stageRef, stageBox] = useBox<HTMLDivElement>();
-  const [dockRef, dockBox] = useBox<HTMLUListElement>();
   const [barRef, barBox] = useBox<HTMLElement>();
   const joinUrl = `${location.origin}/play/${code}`;
   /** A phone-sized window (a replay opened from a phone): faces in a grid with name tags. */
@@ -314,7 +313,7 @@ export function Host({ code, demo, back }: HostProps) {
     ? {
         left: 0,
         top: (stageBox?.bottom ?? viewport.h * 0.32) + gap,
-        bottom: dockBox ? viewport.h - dockBox.top + 16 : 24,
+        bottom: 24,
       }
     : narrow
       ? // The join panel stacks at the top on a phone, so the faces go under it.
@@ -521,7 +520,6 @@ export function Host({ code, demo, back }: HostProps) {
             serverNow={() => socketRef.current?.clock.now() ?? Date.now()}
             name={name}
             stageRef={stageRef}
-            dockRef={dockRef}
           />
         )}
         {notice && <p className="stage-banner notice">{notice}</p>}

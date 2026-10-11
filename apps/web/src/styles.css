@@ -2173,12 +2173,17 @@ button.room-tag {
 }
 
 .verdict-text {
-  max-width: 40ch;
+  display: -webkit-box;
+  max-width: 52ch;
   margin-top: 16px;
+  overflow: hidden;
   color: rgba(255, 255, 255, 0.86);
   font-size: 20px;
   line-height: 1.4;
   text-wrap: balance;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .verdict-text .word {
@@ -2194,22 +2199,23 @@ button.room-tag {
   font-size: 15px;
 }
 
-.accused-kicker {
-  margin-top: 12px;
-  color: var(--stage-2);
-  font-size: 20px;
-}
 
 .accused-name {
-  margin-top: 4px;
+  max-width: 100%;
+  margin-top: 6px;
+  overflow: hidden;
   font: 400 clamp(72px, min(8vw, 12vh), 112px) / 0.95 var(--serif);
   letter-spacing: -0.045em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   animation: rise 300ms ease-out;
 }
 
 .accused-line {
   display: -webkit-box;
   max-width: 64ch;
+  /* Two lines tall even when empty, so the verdict box never changes height. */
+  min-height: 2.8em;
   margin-top: 14px;
   overflow: hidden;
   color: rgba(255, 255, 255, 0.82);
@@ -2220,38 +2226,81 @@ button.room-tag {
   line-clamp: 2;
 }
 
-/* The detective's evidence, one chip at a time along the bottom. */
-.chips-dock {
-  position: absolute;
-  bottom: 24px;
-  left: 50%;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
-  width: min(1100px, calc(100vw - 48px));
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  transform: translateX(-50%);
+/* The verdict: the drumroll, the accusation and the reveal stacked in one grid cell. The cell is as
+   tall as the tallest, the accusation, whose name, subtitle and chip rows all have fixed heights,
+   so the faces and cards below keep one size through the whole verdict. */
+.verdict-frame {
+  display: grid;
+  width: 100%;
 }
 
-.chips-dock li {
-  display: inline-flex;
+.verdict-slide {
+  display: flex;
+  flex-direction: column;
+  grid-area: 1 / 1;
+  align-items: center;
+  min-width: 0;
+  visibility: hidden;
+}
+
+.verdict-slide.on {
+  visibility: visible;
+}
+
+.verdict-slide .stage-line {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* The evidence, two rows of two at most, one line each (the full text is in the tooltip and on
+   the evidence board). */
+.verdict-chips {
+  --chip-h: 40px;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: center;
+  gap: 8px;
+  width: min(1100px, 100%);
+  height: calc(2 * var(--chip-h) + 8px);
+  margin: 14px 0 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  text-shadow: none;
+}
+
+.verdict-chips li {
+  display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 18px;
+  max-width: calc(50% - 4px);
+  height: var(--chip-h);
+  padding: 0 16px;
+  overflow: hidden;
   border: 1px solid var(--stage-hair);
   border-radius: 999px;
   background: var(--glass);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
-  font-size: 17px;
+  font-size: 16px;
+  white-space: nowrap;
   opacity: 0;
   animation: rise 300ms ease-out forwards;
 }
 
-.chips-dock li::before {
+.verdict-chips li span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Two chips or fewer can each take a whole row, so long reasons aren't cut. */
+.verdict-chips:not(:has(li:nth-child(3))) li {
+  max-width: 100%;
+}
+
+.verdict-chips li::before {
   content: '';
   flex: none;
   width: 7px;
@@ -2259,6 +2308,10 @@ button.room-tag {
   border-radius: 50%;
   background: var(--coral);
 }
+
+/* The detective's evidence, one chip at a time along the bottom. */
+
+
 
 /* Things drawn around the faces: the active speaker's gold ring and the empty-seat outline. */
 
@@ -3927,14 +3980,14 @@ button.room-tag {
     font-size: 18px;
   }
 
-  .chips-dock {
-    bottom: 12px;
+  .verdict-chips {
+    --chip-h: 30px;
     gap: 6px;
-    width: calc(100vw - 24px);
   }
 
-  .chips-dock li {
-    padding: 6px 12px;
+  .verdict-chips li {
+    max-width: 100%;
+    padding: 0 12px;
     font-size: 13px;
   }
 }
@@ -3948,7 +4001,7 @@ button.room-tag {
     transition-duration: 1ms !important;
   }
 
-  .chips-dock li {
+  .verdict-chips li {
     opacity: 1;
   }
 }
