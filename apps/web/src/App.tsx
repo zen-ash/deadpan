@@ -42,10 +42,13 @@ export function App() {
 
   if (kind === 'host' && !round) {
     // ?demo=N plays back round N of this room from its recording (?demo alone means round 1).
-    const demo = new URLSearchParams(location.search).get('demo');
+    // &from=CODE is the live room it was opened from, for the way back.
+    const params = new URLSearchParams(location.search);
+    const demo = params.get('demo');
+    const from = normalizeRoomCode(params.get('from') ?? '') ?? undefined;
     return (
       <Suspense fallback={<Loading text="Loading the big screen…" />}>
-        <Host code={code} demo={demo === null ? undefined : Math.max(1, Math.floor(Number(demo)) || 1)} />
+        <Host code={code} demo={demo === null ? undefined : Math.max(1, Math.floor(Number(demo)) || 1)} from={from} />
       </Suspense>
     );
   }
@@ -54,7 +57,12 @@ export function App() {
     return (
       <Suspense fallback={<Loading text="Loading the evidence board…" />}>
         <main className="replay-page">
-          <EvidenceBoard room={code} round={Number(round)} onClose={() => location.assign(`/host/${code}`)} closeLabel={`Back to room ${code}`} />
+          <EvidenceBoard
+            room={code}
+            round={Number(round)}
+            onClose={() => location.assign(`/host/${code}`)}
+            closeLabel={`Back to room ${code}`}
+          />
         </main>
       </Suspense>
     );

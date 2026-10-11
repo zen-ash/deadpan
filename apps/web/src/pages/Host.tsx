@@ -5,6 +5,7 @@ import { HostAudio } from '../host/audio';
 import { CameraView } from '../host/CameraView';
 import { DemoSocket } from '../host/demo';
 import { EvidenceBoard } from '../host/EvidenceBoard';
+import { PastRounds } from '../host/PastRounds';
 import { Interrogation } from '../host/Interrogation';
 import { layoutSuspects, stageArea, type Reserved } from '../host/layout';
 import { live } from '../host/live';
@@ -65,8 +66,15 @@ function useViewport() {
   return size;
 }
 
-/** `demo` plays back that recorded round of the room instead of joining it live. */
-export function Host({ code, demo }: { code: string; demo?: number }) {
+interface HostProps {
+  code: string;
+  /** Plays back that recorded round of the room instead of joining it live. */
+  demo?: number;
+  /** In demo mode, the live room the replay was opened from. */
+  from?: string;
+}
+
+export function Host({ code, demo, from }: HostProps) {
   const socketRef = useRef<Link | null>(null);
   const roundRef = useRef(0);
   /** Every name seen in this room, so players who leave keep theirs on the verdict. */
@@ -85,7 +93,9 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
   const [transcript, setTranscript] = useState<{ turnId: string; text: string } | null>(null);
   const [notice, setNotice] = useState('');
   /** The round shown on the evidence board, if it's open. */
-  const [evidence, setEvidence] = useState<number | null>(null);
+  const [evidence, setEvidence] = useState<{ room: string; round: number } | null>(null);
+  /** The list of saved rounds to replay, in the lobby. */
+  const [pastRounds, setPastRounds] = useState(false);
   /** The camera view for the computer vision judges; phones send full landmark frames while it's open. */
   const [cameraView, setCameraView] = useState(false);
   const cameraViewRef = useRef(false);
@@ -174,13 +184,17 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
     };
   }, [code, demo, audio]);
 
-  // Escape closes the evidence board, like any pop-up.
+  // Escape closes the evidence board, then the past rounds, like any pop-up.
   useEffect(() => {
-    if (evidence === null) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setEvidence(null);
+    if (evidence === null && !pastRounds) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (evidence !== null) setEvidence(null);
+      else setPastRounds(false);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [evidence]);
+  }, [evidence, pastRounds]);
 
   const showCameraView = useCallback((on: boolean) => {
     cameraViewRef.current = on;
@@ -203,6 +217,7 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
     // Starting a round is a click, which is what browsers need before they play sound.
     if (t === 'start_round') enableSound();
     setEvidence(null);
+    setPastRounds(false);
     socketRef.current?.send({ t });
   };
   const inRound = !!game && game.phase !== 'lobby';
@@ -329,9 +344,20 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
                 Turn on sound
               </button>
             )}
+            {!inRound && !demo && (
+              <button className="btn glass" onClick={() => setPastRounds(true)}>
+                Past rounds
+              </button>
+            )}
             <button className="btn glass" onClick={() => showCameraView(true)}>
               Camera view
             </button>
+            {/* A replay opened from a live room goes back to it; one opened by its link goes live in its own room. */}
+            {!inRound && demo && (
+              <a className="btn glass" href={`/host/${from ?? code}`}>
+                {from ? `Back to room ${from}` : 'Exit replay'}
+              </a>
+            )}
             {inRound && game.phase !== 'verdict' && (
               <button className="btn glass" onClick={() => send('end_round')}>
                 {demo ? 'Stop replay' : 'End round'}
@@ -340,9 +366,15 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
             {/* After the reveal the corner holds what's next, keeping the faces clear. */}
             {revealed && (
               <>
-                <button className="btn gold" onClick={() => setEvidence(revealed.round)}>
+                <button className="btn gold" onClick={() => setEvidence({ room: code, round: revealed.round })}>
                   See the evidence
                 </button>
+                {/* In demo mode "Play again" already replays it. */}
+                {!demo && (
+                  <a className="btn glass" href={`/host/${code}?demo=${revealed.round}&from=${code}`}>
+                    Replay round
+                  </a>
+                )}
                 <button className="btn glass" onClick={() => send('start_round')}>
                   Play again
                 </button>
@@ -434,9 +466,13 @@ export function Host({ code, demo }: { code: string; demo?: number }) {
         <CameraView players={players} activeId={activeId} status={cameraStatus()} replay={!!demo} onClose={() => showCameraView(false)} />
       )}
 
+      {pastRounds && (
+        <PastRounds from={code} onEvidence={(room, round) => setEvidence({ room, round })} onClose={() => setPastRounds(false)} />
+      )}
+
       {evidence !== null && (
         <div className="board-backdrop" onClick={(e) => e.target === e.currentTarget && setEvidence(null)}>
-          <EvidenceBoard room={code} round={evidence} onClose={() => setEvidence(null)} />
+          <EvidenceBoard room={evidence.room} round={evidence.round} onClose={() => setEvidence(null)} />
         </div>
       )}
     </main>

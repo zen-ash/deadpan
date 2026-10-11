@@ -8,7 +8,7 @@ import { VENDOR_CONTENT_TYPES } from '../../apps/web/vendorAssets';
 import { normalizeRoomCode } from '@deadpan/shared';
 import { prewarm, serveLine, serveSfx } from './audio';
 import { allCannedLines } from './lines';
-import { roundAudioPath, roundFilePath } from './recorder';
+import { listRounds, roundAudioPath, roundFilePath } from './recorder';
 import { createSocketServer, findRoom } from './rooms';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -27,13 +27,21 @@ app.get('/healthz', (_req, res) => {
 // The detective's lines and sound effects, played by the big screen.
 app.get('/api/line/:file', (req, res) => void serveLine(req, res));
 app.get('/api/sfx/:file', serveSfx);
-// Round recordings for the evidence board: the live round from memory, older ones from rounds/.
+// Saved rounds that demo mode can play back, for the big screen's "Past rounds" list.
+app.get('/api/rounds', (_req, res) => {
+  res.json(listRounds().slice(0, 50));
+});
+// Round recordings for the evidence board and demo mode: the live round from memory (with
+// X-Round-Saved: 0 until it's complete), older ones from rounds/.
 app.get('/api/rounds/:room/:round', (req, res) => {
   const code = normalizeRoomCode(String(req.params.room));
   const round = Number(req.params.round);
   if (!code || !Number.isInteger(round) || round < 1) return void res.status(400).end();
   const live = findRoom(code)?.game.roundData(round);
-  if (live) return void res.json(live);
+  if (live) {
+    res.setHeader('X-Round-Saved', live.saved ? '1' : '0');
+    return void res.json(live.file);
+  }
   const file = roundFilePath(code, round);
   if (!existsSync(file)) return void res.status(404).json({ error: 'No recording of that round.' });
   res.type('application/json').sendFile(file);

@@ -1,7 +1,7 @@
 // Records one round in memory and writes it to rounds/<room>-<round>.json when it ends (SPEC:
 // no database). The evidence board and demo mode read these files. Gemini's dynamic voice lines
 // are copied next to them, so a replay can play them after the in-memory audio has expired.
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -10,6 +10,7 @@ import type {
   RoundEvent,
   RoundFile,
   RoundSample,
+  RoundSummary,
   SfxName,
   SpokenLine,
   TranscriptWord,
@@ -46,11 +47,62 @@ export function lastSavedRound(room: string): number {
   }
 }
 
+/** Round files already read for the list, by name, until they change. */
+const summaries = new Map<string, { mtimeMs: number; summary: RoundSummary | null }>();
+
+/** Saved rounds that demo mode can play back, newest first. Each file is read once. */
+export function listRounds(): RoundSummary[] {
+  let files: string[];
+  try {
+    files = readdirSync(ROUNDS_DIR).filter((f) => /^[A-Z]{4}-\d+\.json$/.test(f));
+  } catch {
+    return [];
+  }
+  const out: RoundSummary[] = [];
+  for (const file of files) {
+    const path = resolve(ROUNDS_DIR, file);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      continue;
+    }
+    let cached = summaries.get(file);
+    if (cached?.mtimeMs !== mtimeMs) {
+      cached = { mtimeMs, summary: summarize(path) };
+      summaries.set(file, cached);
+    }
+    if (cached.summary) out.push(cached.summary);
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** The list entry for a round file, or null if it can't be played back (recorded before demo mode). */
+function summarize(path: string): RoundSummary | null {
+  try {
+    const r = JSON.parse(readFileSync(path, 'utf8')) as RoundFile;
+    if (!r.events?.length) return null;
+    return {
+      room: r.room,
+      round: r.round,
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      players: r.players.map((p) => p.name),
+      word: r.word,
+      caught: r.verdict ? r.verdict.correct : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export class RoundRecorder {
   private readonly data: RoundFile;
   private readonly lastMeshAt = new Map<string, number>();
   /** Set once the round is saved; anything after that isn't part of it. */
   private closed = false;
+  /** The file is written, so the recording is complete. */
+  saved = false;
 
   constructor(room: string, round: number, players: { id: string; name: string; slot: number }[]) {
     this.data = {
@@ -126,7 +178,15 @@ export class RoundRecorder {
   }
 
   turnStarted(info: TurnInfo) {
-    this.data.turns.push({ id: info.id, kind: info.kind, playerId: info.playerId, question: info.text, askedAt: Date.now(), questionEnd: null, answerEnd: null });
+    this.data.turns.push({
+      id: info.id,
+      kind: info.kind,
+      playerId: info.playerId,
+      question: info.text,
+      askedAt: Date.now(),
+      questionEnd: null,
+      answerEnd: null,
+    });
   }
 
   turnTimes(turnId: string, times: { questionEnd?: number; answerEnd?: number }) {
@@ -182,6 +242,7 @@ export class RoundRecorder {
         console.warn(`[rounds] ${this.data.room}-${this.data.round}.json already exists`);
       }
       writeFileSync(file, JSON.stringify(this.data), { flag: 'wx' });
+      this.saved = true;
       return file;
     } catch (err) {
       console.warn('[rounds] could not save the round:', err instanceof Error ? err.message : err);

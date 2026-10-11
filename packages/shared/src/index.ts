@@ -299,6 +299,18 @@ export type ServerToClient =
  */
 export type RoundSample = [number, number, number, number, number, number, number, number, number, number, number, number, number?, number?];
 
+/** A saved round that demo mode can play back, for the big screen's "Past rounds" list. */
+export interface RoundSummary {
+  room: string;
+  round: number;
+  startedAt: number;
+  endedAt: number;
+  players: string[];
+  word: string | null;
+  /** Whether the detective caught the imposter; null without a verdict. */
+  caught: boolean | null;
+}
+
 /** The game messages the big screen got during the round, which demo mode plays back in time. */
 export type RoundEvent = Extract<ServerToClient, { t: 'state' | 'say' | 'sfx' | 'answer' | 'verdict' | 'live_transcript' }>;
 

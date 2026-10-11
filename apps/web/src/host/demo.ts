@@ -21,6 +21,8 @@ const TICK_MS = 1000 / 15;
 const LOOP_MS = 6000;
 /** Mesh frames further apart than this mean the face was out of view in between. */
 const MESH_GAP_MS = 600;
+/** Seconds to wait for a round that just ended to finish saving. */
+const SAVE_WAIT_TRIES = 20;
 
 interface Track {
   id: string;
@@ -70,10 +72,7 @@ export class DemoSocket implements Link {
 
   private async load() {
     try {
-      const res = await fetch(`/api/rounds/${this.room}/${this.round}`, { signal: AbortSignal.timeout(10_000) });
-      if (!res.ok)
-        throw new Error(res.status === 404 ? `No recording of room ${this.room}, round ${this.round}.` : `Server error ${res.status}.`);
-      const file = (await res.json()) as RoundFile;
+      const file = await this.fetchSaved();
       if (!file.events?.length) throw new Error('That round was recorded before demo mode existed. Record a new one.');
       if (this.stopped) return;
       this.file = file;
@@ -95,6 +94,18 @@ export class DemoSocket implements Link {
       const message = err instanceof Error ? err.message : String(err);
       this.handlers.onConnectedChange?.(true);
       this.emit({ t: 'error', code: 'bad_room', message: `Demo mode: ${message}` });
+    }
+  }
+
+  /** The round's file. A round that just ended is still saved for a few seconds, so wait for it. */
+  private async fetchSaved(): Promise<RoundFile> {
+    for (let tries = 0; ; tries++) {
+      const res = await fetch(`/api/rounds/${this.room}/${this.round}`, { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok)
+        throw new Error(res.status === 404 ? `No recording of room ${this.room}, round ${this.round}.` : `Server error ${res.status}.`);
+      if (res.headers.get('X-Round-Saved') !== '0' || tries >= SAVE_WAIT_TRIES) return (await res.json()) as RoundFile;
+      await new Promise((r) => setTimeout(r, 1000));
+      if (this.stopped) throw new Error('stopped');
     }
   }
 

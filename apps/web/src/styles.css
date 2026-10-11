@@ -3066,6 +3066,140 @@ button.room-tag {
   }
 }
 
+/* Past rounds: saved rounds to replay or inspect, over the lobby. */
+
+.rounds-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 28;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(16px, 5vh, 56px) 16px;
+  overflow: auto;
+  background: rgba(4, 5, 7, 0.72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  animation: fade-in 300ms ease-out;
+}
+
+.rounds {
+  width: 100%;
+  max-width: 1000px;
+  padding: clamp(20px, 3vw, 36px);
+  border: 1px solid var(--stage-hair);
+  border-radius: 28px;
+  background: rgba(12, 14, 19, 0.88);
+  box-shadow: 0 40px 80px -24px rgba(0, 0, 0, 0.7);
+  color: var(--stage-text);
+}
+
+.rounds-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px 24px;
+}
+
+.rounds-eyebrow {
+  color: var(--stage-2);
+}
+
+.rounds-title {
+  margin-top: 6px;
+  font: 400 clamp(36px, 4vw, 52px) / 1 var(--serif);
+  letter-spacing: -0.025em;
+}
+
+.rounds-sub {
+  margin-top: 8px;
+  color: var(--stage-2);
+  font-size: 15px;
+}
+
+.rounds-status {
+  margin-top: 28px;
+  color: var(--stage-2);
+  font-size: 16px;
+}
+
+.rounds-status.bad {
+  color: var(--coral);
+}
+
+.rounds-list {
+  margin: 24px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--stage-hair);
+  list-style: none;
+}
+
+.round-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--stage-hair);
+}
+
+.round-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.round-name {
+  font: 400 24px/1.1 var(--serif);
+  letter-spacing: -0.01em;
+}
+
+.round-players,
+.round-when {
+  overflow: hidden;
+  color: var(--stage-2);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.round-result {
+  font-size: 15px;
+}
+
+/* The same colours as the stamps on the cards. */
+.round-result.caught {
+  color: var(--coral);
+}
+
+.round-result.escaped {
+  color: var(--warn-dark);
+}
+
+.round-word {
+  color: var(--stage-2);
+}
+
+.round-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.round-actions .btn {
+  min-height: 40px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+@media (max-width: 760px) {
+  .round-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Camera view: what each phone's vision pipeline sees, for the computer vision judges. */
 
 .camview {

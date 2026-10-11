@@ -150,8 +150,8 @@ export class ImposterGame {
   }
 
   /** The current round's recording, if it's the one asked for (before or after it's saved). */
-  roundData(round: number): RoundFile | null {
-    return this.recorder?.round === round ? this.recorder.snapshot() : null;
+  roundData(round: number): { file: RoundFile; saved: boolean } | null {
+    return this.recorder?.round === round ? { file: this.recorder.snapshot(), saved: this.recorder.saved } : null;
   }
 
   onSample(player: Player, f: FeaturesPacket) {
