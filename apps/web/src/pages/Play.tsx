@@ -4,7 +4,7 @@ import { diagnoseMediaError, micLevel, startPhoneMedia, trackOk, type MediaFailu
 import { RoomSocket } from '../lib/socket';
 import { DebugOverlay } from '../phone/DebugOverlay';
 import { loadFaceLandmarker } from '../phone/face';
-import { GamePanel } from '../phone/GamePanel';
+import { GamePanel, type Lie } from '../phone/GamePanel';
 import { MicBars } from '../phone/MicBars';
 import { PhoneSignals } from '../phone/signals';
 import { TurnController } from '../phone/turns';
@@ -101,6 +101,8 @@ export function Play({ code }: { code: string }) {
   const [game, setGame] = useState<GameState | null>(null);
   /** undefined until dealt; null means this player is the imposter. */
   const [secret, setSecret] = useState<string | null | undefined>(undefined);
+  /** Two Truths and a Lie: which answer to lie on, once dealt. */
+  const [lie, setLie] = useState<Lie | undefined>(undefined);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [scribeStatus, setScribeStatus] = useState('off');
 
@@ -145,11 +147,15 @@ export function Play({ code }: { code: string }) {
             setGame(msg);
             if (msg.phase === 'lobby' || msg.phase === 'baseline') {
               setSecret(undefined);
+              setLie(undefined);
               setVerdict(null);
             }
             break;
           case 'secret':
             setSecret(msg.word);
+            break;
+          case 'your_lie':
+            setLie({ question: msg.question, of: msg.of });
             break;
           case 'verdict':
             setVerdict(msg);
@@ -547,6 +553,7 @@ export function Play({ code }: { code: string }) {
             playerId={playerId}
             name={(id) => players.find((p) => p.id === id)?.name ?? knownNames.current.get(id) ?? 'Someone'}
             secret={secret}
+            lie={lie}
             verdict={verdict}
             serverNow={serverNow}
             faceLost={faceLost}

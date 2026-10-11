@@ -75,10 +75,17 @@ export function RoundList({ rounds, from, onEvidence }: ListProps) {
           <span className="round-when">
             {when(r.startedAt)} · {length(r.endedAt - r.startedAt)}
           </span>
-          <span className={`round-result ${r.caught === null ? '' : r.caught ? 'caught' : 'escaped'}`}>
-            {r.caught === null ? 'No verdict' : r.caught ? 'Caught' : 'Escaped'}
-            {r.word && <span className="round-word"> · {r.word}</span>}
-          </span>
+          {r.lies ? (
+            <span className={`round-result ${r.lies.caught === r.lies.total ? 'caught' : r.lies.caught === 0 ? 'escaped' : ''}`}>
+              {r.lies.caught} of {r.lies.total} {r.lies.total === 1 ? 'lie' : 'lies'} found
+              <span className="round-word"> · Two truths</span>
+            </span>
+          ) : (
+            <span className={`round-result ${r.caught === null ? '' : r.caught ? 'caught' : 'escaped'}`}>
+              {r.caught === null ? 'No verdict' : r.caught ? 'Caught' : 'Escaped'}
+              {r.word ? <span className="round-word"> · {r.word}</span> : r.mode === 'truths' && <span className="round-word"> · Two truths</span>}
+            </span>
+          )}
           <span className="round-actions">
             <button className="btn glass" onClick={() => onEvidence(r.room, r.round)}>
               Evidence

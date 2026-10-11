@@ -1,4 +1,4 @@
-import { ANSWER_CAP_MS, type GameState, type SpokenLine, type TurnInfo, type Verdict } from '@deadpan/shared';
+import { ANSWER_CAP_MS, TRUTHS_QUESTIONS, type GameState, type SpokenLine, type TruthsVerdict, type TurnInfo, type Verdict } from '@deadpan/shared';
 import { useEffect, useState, type Ref } from 'react';
 import { withPeriod } from '../ui';
 
@@ -31,8 +31,44 @@ function lengthClass(text: string): string {
 
 function eyebrowFor(turn: TurnInfo): string {
   if (turn.kind === 'baseline') return `Calibrating · Question ${turn.index} of ${turn.total}`;
-  if (turn.kind === 'followup') return 'Follow-up';
+  if (turn.kind === 'followup') return turn.about ? `Follow-up · On question ${turn.about}` : 'Follow-up';
+  // Two Truths and a Lie counts each player's own questions, since each lies on one of them.
+  if (turn.seq) return `Two truths, one lie · Question ${turn.seq} of ${TRUTHS_QUESTIONS}`;
   return `Questioning · Question ${turn.index} of ${turn.total}`;
+}
+
+/** "Ash", "Ash and Zen", "Ash, Zen and Riya". */
+function list(names: string[]): string {
+  return names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/** The headline after a Two Truths and a Lie reveal. */
+function truthsTitle(v: TruthsVerdict): string {
+  const n = v.picks.length;
+  if (v.caught === 0) return 'Fooled.';
+  if (v.caught === n) return n === 1 ? 'Caught.' : 'Caught them all.';
+  return `Caught ${v.caught} of ${n}.`;
+}
+
+function truthsText(v: TruthsVerdict, name: (id: string) => string): string {
+  if (v.picks.length === 1) {
+    const p = v.picks[0]!;
+    return p.correct
+      ? `${name(p.playerId)} lied on question ${p.lie}, and the detective found it.`
+      : `${name(p.playerId)} lied on question ${p.lie}; the detective picked question ${p.picked}.`;
+  }
+  const found = v.picks.filter((p) => p.correct).map((p) => name(p.playerId));
+  const missed = v.picks.filter((p) => !p.correct).map((p) => name(p.playerId));
+  const parts: string[] = [];
+  if (found.length > 0) parts.push(`The detective found ${list(found.map((n) => `${n}’s`))} ${found.length === 1 ? 'lie' : 'lies'}.`);
+  if (missed.length > 0) parts.push(`${list(missed)} got away with ${missed.length === 1 ? 'it' : 'theirs'}.`);
+  return parts.join(' ');
+}
+
+function sourceText(v: Verdict): string {
+  return v.source === 'gemini'
+    ? `Gemini verdict${v.confidence !== null ? ` · ${Math.round(v.confidence * 100)}% sure` : ''}`
+    : 'Local verdict · Gemini was unavailable';
 }
 
 /** The big screen's overlay during a round: who's asked, the detective's line, the timer and the verdict. */
@@ -49,8 +85,42 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
   }, [ticking, serverNow]);
   const msUntil = (t: number | null) => (t === null ? null : Math.max(0, t - now));
 
+  if (game.phase === 'verdict' && verdict?.mode === 'truths' && game.verdictStage !== 'deliberating') {
+    // Each card shows the detective's pick (and later the real lie), so the text block stays short.
+    const accusing = game.verdictStage === 'accusing';
+    return (
+      <>
+        <div className="stage verdict" ref={stageRef}>
+          <p className="stage-eyebrow">Verdict · Round {game.round}</p>
+          {accusing ? (
+            <>
+              <p className="accused-kicker">The detective names the lies</p>
+              {line && <p className="accused-line">“{line.text}”</p>}
+            </>
+          ) : (
+            <>
+              <h1 className="verdict-title">{truthsTitle(verdict)}</h1>
+              <p className="verdict-text">{truthsText(verdict, name)}</p>
+              <p className="verdict-source">{sourceText(verdict)}</p>
+            </>
+          )}
+        </div>
+        {/* With 5 or 6 players the reasons would stack three rows deep; the picks are on the cards anyway. */}
+        {accusing && verdict.picks.length > 0 && verdict.picks.length <= 4 && (
+          <ul className="chips-dock" ref={dockRef}>
+            {verdict.picks.map((p, i) => (
+              <li key={p.playerId} style={{ animationDelay: `${0.4 + i * 0.9}s` }}>
+                {name(p.playerId)}, question {p.picked}: {p.why}
+              </li>
+            ))}
+          </ul>
+        )}
+      </>
+    );
+  }
+
   if (game.phase === 'verdict') {
-    const shown = game.verdictStage !== 'deliberating' && verdict;
+    const shown = game.verdictStage !== 'deliberating' && verdict?.mode !== 'truths' && verdict;
     return (
       <>
         <div className="stage verdict" ref={stageRef}>
@@ -80,11 +150,7 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
                 )}{' '}
                 The word was <span className="word">{verdict.word}</span>.
               </p>
-              <p className="verdict-source">
-                {verdict.source === 'gemini'
-                  ? `Gemini verdict${verdict.confidence !== null ? ` · ${Math.round(verdict.confidence * 100)}% sure` : ''}`
-                  : 'Local verdict · Gemini was unavailable'}
-              </p>
+              <p className="verdict-source">{sourceText(verdict)}</p>
             </>
           )}
         </div>
@@ -109,7 +175,9 @@ export function Interrogation({ game, verdict, line, transcript, serverNow, name
       <div className="stage" ref={stageRef}>
         <p className="stage-eyebrow">The deal</p>
         <h1 className="stage-line">{line ? `“${line.text}”` : 'Secrets dealt.'}</h1>
-        <p className="stage-asks">Hold the case file on your phone to read it.</p>
+        <p className="stage-asks">
+          {game.mode === 'truths' ? 'Your phone says which answer to lie on.' : 'Hold the case file on your phone to read it.'}
+        </p>
         {left !== null && <p className="stage-count">{Math.ceil(left / 1000)}</p>}
       </div>
     );

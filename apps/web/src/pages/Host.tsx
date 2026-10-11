@@ -1,4 +1,4 @@
-import { MAX_PLAYERS, type AnswerResult, type GameState, type PlayerInfo, type SpokenLine, type Verdict } from '@deadpan/shared';
+import { MAX_PLAYERS, type AnswerResult, type GameMode, type GameState, type PlayerInfo, type SpokenLine, type Verdict } from '@deadpan/shared';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { HostAudio } from '../host/audio';
@@ -19,6 +19,16 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const TOP_BAR_H = 76;
 /** Gap between a text block and the faces below it. */
 const TEXT_GAP = 28;
+/** The game picked in the lobby, remembered on this computer. */
+const MODE_STORE = 'deadpan:mode';
+
+function loadMode(): GameMode {
+  try {
+    return localStorage.getItem(MODE_STORE) === 'truths' ? 'truths' : 'imposter';
+  } catch {
+    return 'imposter';
+  }
+}
 
 interface Box {
   top: number;
@@ -99,6 +109,8 @@ export function Host({ code, demo, back }: HostProps) {
   /** The camera view for the computer vision judges; phones send full landmark frames while it's open. */
   const [cameraView, setCameraView] = useState(false);
   const cameraViewRef = useRef(false);
+  /** Which game "Start round" plays. */
+  const [mode, setMode] = useState<GameMode>(loadMode);
   const viewport = useViewport();
   // The suspects fit around these: the lobby's join panel and headline, the round's text block
   // at the top and the evidence chips at the bottom.
@@ -221,7 +233,15 @@ export function Host({ code, demo, back }: HostProps) {
     if (t === 'start_round') enableSound();
     setEvidence(null);
     setPastRounds(false);
-    socketRef.current?.send({ t });
+    socketRef.current?.send(t === 'start_round' ? { t, mode } : { t });
+  };
+  const chooseMode = (next: GameMode) => {
+    setMode(next);
+    try {
+      localStorage.setItem(MODE_STORE, next);
+    } catch {
+      // Private mode: the choice lasts until the page reloads.
+    }
   };
   const inRound = !!game && game.phase !== 'lobby';
   // Someone who left still has a name on the verdict.
@@ -229,12 +249,14 @@ export function Host({ code, demo, back }: HostProps) {
   const lastScored = (id: string) => answers.findLast((a) => a.playerId === id && a.kind !== 'baseline');
 
   // Where the lamp points: whoever is being questioned, a sweep during the drumroll, then the accused.
+  // Two Truths and a Lie judges everyone, so the lamp sweeps on through the picks and then rests.
   const turn = game?.turn ?? null;
   const verdictShown = game?.phase === 'verdict' && game.verdictStage !== 'deliberating' && verdict;
-  const focus: string | 'sweep' | null =
-    game?.phase === 'verdict' ? (verdictShown ? verdict.accusedId : 'sweep') : (turn?.playerId ?? null);
-  const activeId = verdictShown ? verdict.accusedId : (turn?.playerId ?? null);
   const revealed = game?.phase === 'verdict' && game.verdictStage === 'revealed' && verdict ? verdict : null;
+  const accusedId = verdictShown && verdict.mode !== 'truths' ? verdict.accusedId : null;
+  const focus: string | 'sweep' | null =
+    game?.phase === 'verdict' ? (accusedId ?? (revealed ? null : 'sweep')) : (turn?.playerId ?? null);
+  const activeId = game?.phase === 'verdict' ? accusedId : (turn?.playerId ?? null);
   const moment: CardMoment = !inRound
     ? 'lobby'
     : revealed
@@ -245,25 +267,44 @@ export function Host({ code, demo, back }: HostProps) {
           ? 'calibrating'
           : 'questioning';
 
-  const suspects: SuspectView[] = players.map((p) => ({
-    player: p,
-    // Once revealed, the round's mean drift: what the detective weighed.
-    drift: revealed ? (revealed.scores.find((s) => s.playerId === p.id)?.delivery ?? null) : (lastScored(p.id)?.delivery ?? null),
-    lastAnswer: answers.findLast((a) => a.playerId === p.id),
-    benched: inRound && !game?.roundPlayers.includes(p.id),
-    // Only players who were in the round get a role; anyone who joined since sits it out.
-    role:
-      revealed && revealed.scores.some((s) => s.playerId === p.id) ? (p.id === revealed.imposterId ? 'imposter' : 'innocent') : undefined,
-    stamp: revealed
-      ? p.id === revealed.accusedId
-        ? revealed.correct
-          ? 'caught'
-          : 'accused'
-        : p.id === revealed.imposterId
-          ? 'escaped'
-          : undefined
-      : undefined,
-  }));
+  /** The mean drift of a player's scored answers this round. */
+  const roundDrift = (id: string) => {
+    const ds = answers.filter((a) => a.playerId === id && a.delivery !== null).map((a) => a.delivery!);
+    return ds.length > 0 ? ds.reduce((a, b) => a + b, 0) / ds.length : null;
+  };
+  const suspects: SuspectView[] = players.map((p) => {
+    const pick = verdictShown && verdict.mode === 'truths' ? verdict.picks.find((l) => l.playerId === p.id) : undefined;
+    return {
+      player: p,
+      // Once revealed, the round's mean drift: what the detective weighed.
+      drift: revealed
+        ? revealed.mode === 'truths'
+          ? roundDrift(p.id)
+          : (revealed.scores.find((s) => s.playerId === p.id)?.delivery ?? null)
+        : (lastScored(p.id)?.delivery ?? null),
+      lastAnswer: answers.findLast((a) => a.playerId === p.id),
+      benched: inRound && !game?.roundPlayers.includes(p.id),
+      // Only players who were in the round get a role; anyone who joined since sits it out.
+      role:
+        revealed && revealed.mode !== 'truths' && revealed.scores.some((s) => s.playerId === p.id)
+          ? p.id === revealed.imposterId
+            ? 'imposter'
+            : 'innocent'
+          : undefined,
+      lie: pick ? { picked: pick.picked, lie: revealed ? pick.lie : null } : undefined,
+      stamp: !revealed
+        ? undefined
+        : revealed.mode === 'truths'
+          ? pick && (pick.correct ? 'caught' : 'escaped')
+          : p.id === revealed.accusedId
+            ? revealed.correct
+              ? 'caught'
+              : 'accused'
+            : p.id === revealed.imposterId
+              ? 'escaped'
+              : undefined,
+    };
+  });
 
   // In the lobby, the empty seats take one more slot in the lineup (a replay has no seats to fill).
   const openSeats = inRound || demo ? 0 : MAX_PLAYERS - players.length;
@@ -289,7 +330,7 @@ export function Host({ code, demo, back }: HostProps) {
     if (turn) return `${name(turn.playerId)} ${turn.stage === 'asking' ? 'is being asked' : 'is answering'}`;
     if (game.phase === 'deal') return 'The deal';
     if (game.phase === 'verdict')
-      return verdictShown ? `The detective accuses ${name(verdict.accusedId)}` : 'The detective is deliberating';
+      return accusedId ? `The detective accuses ${name(accusedId)}` : verdictShown ? 'The detective names the lies' : 'The detective is deliberating';
     return 'Round in progress';
   };
 
@@ -432,10 +473,21 @@ export function Host({ code, demo, back }: HostProps) {
                 <p className="suspect-count">
                   {players.length === 0 ? 'Waiting for suspects…' : `${players.length} of ${MAX_PLAYERS} suspects in the room`}
                 </p>
+                <div className="mode-switch" role="radiogroup" aria-label="Game">
+                  <button role="radio" aria-checked={mode === 'imposter'} className={mode === 'imposter' ? 'on' : ''} onClick={() => chooseMode('imposter')}>
+                    Imposter
+                  </button>
+                  <button role="radio" aria-checked={mode === 'truths'} className={mode === 'truths' ? 'on' : ''} onClick={() => chooseMode('truths')}>
+                    Two truths, one lie
+                  </button>
+                </div>
+                <p className="mode-note">
+                  {mode === 'truths' ? 'Three questions each. Everyone lies once.' : 'One of you doesn’t know the secret word.'}
+                </p>
                 <button className="btn gold" disabled={players.length === 0} onClick={() => send('start_round')}>
                   Start round
                 </button>
-                {players.length === 1 && <p className="panel-note">Imposter needs 2 or more players. One works for testing.</p>}
+                {players.length === 1 && mode === 'imposter' && <p className="panel-note">Imposter needs 2 or more players. One works for testing.</p>}
                 {LOCAL_HOSTS.has(location.hostname) && (
                   <p className="stage-banner">
                     Phones can't reach localhost. Open this page through the https tunnel link so the QR code works.

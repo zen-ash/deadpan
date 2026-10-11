@@ -1,6 +1,6 @@
 import type { FeaturesPacket, PlayerInfo, ServerToClient } from '@deadpan/shared';
 import type { WebSocket } from 'ws';
-import type { ImposterGame } from './game';
+import type { Game } from './game';
 
 /** How much signal history to keep per player, for baselines and answer windows. */
 const HISTORY_MS = 120_000;
@@ -38,7 +38,7 @@ export interface Room {
   hosts: Set<WebSocket>;
   /** Hosts with the camera view open; phones send full landmark frames while there are any. */
   cameraHosts: Set<WebSocket>;
-  game: ImposterGame;
+  game: Game;
   cleanup?: NodeJS.Timeout;
 }
 

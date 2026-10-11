@@ -1,6 +1,6 @@
 // The owner's page: every saved round from every room, and how often the detective caught the
 // imposter. The server only answers with the ADMIN_KEY; this tab remembers it until it closes.
-import type { AdminRounds, RoundLogEntry } from '@deadpan/shared';
+import type { AdminRounds, ImposterLogEntry, RoundLogEntry, TruthsLogEntry } from '@deadpan/shared';
 import { useEffect, useState, type FormEvent } from 'react';
 import { EvidenceBoard } from '../host/EvidenceBoard';
 import { RoundList } from '../host/PastRounds';
@@ -97,6 +97,7 @@ export function Admin() {
   }
 
   const stats = accuracy(data.log);
+  const lies = liesFound(data.log);
   return (
     <main className="admin-page">
       <section className="rounds admin">
@@ -113,6 +114,13 @@ export function Admin() {
               <p className="rounds-sub">
                 Gemini made {stats.gemini} of those verdicts; the local fallback made {stats.rounds - stats.gemini}. Single-player test
                 rounds aren’t counted.
+              </p>
+            )}
+            {lies && (
+              <p className="rounds-sub">
+                Two truths and a lie: the detective found {lies.caught} of {lies.total} lies ({pct(lies.caught / lies.total)}) over{' '}
+                {lies.rounds} {lies.rounds === 1 ? 'round' : 'rounds'}. Guessing would get about {pct(lies.chance)}. Gemini judged{' '}
+                {lies.gemini} of those rounds.
               </p>
             )}
           </div>
@@ -136,9 +144,9 @@ export function Admin() {
   );
 }
 
-/** The accuracy stat from rounds.jsonl, over rounds with 2 or more players. */
+/** The Imposter accuracy stat from rounds.jsonl, over rounds with 2 or more players. */
 function accuracy(log: RoundLogEntry[]) {
-  const played = log.filter((e) => e.players >= 2);
+  const played = log.filter((e): e is ImposterLogEntry => e.mode !== 'truths' && e.players >= 2);
   if (played.length === 0) return null;
   return {
     rounds: played.length,
@@ -146,6 +154,24 @@ function accuracy(log: RoundLogEntry[]) {
     gemini: played.filter((e) => e.source === 'gemini').length,
     // A random accusation is right one time in N.
     chance: played.reduce((sum, e) => sum + 1 / e.players, 0) / played.length,
+  };
+}
+
+/**
+ * Two Truths and a Lie: how many lies the detective found. Single-player rounds count, since a lie
+ * among three answers is just as hard to find alone.
+ */
+function liesFound(log: RoundLogEntry[]) {
+  const played = log.filter((e): e is TruthsLogEntry => e.mode === 'truths' && e.lies > 0);
+  const options = played.flatMap((e) => e.options);
+  if (played.length === 0 || options.length === 0) return null;
+  return {
+    rounds: played.length,
+    total: played.reduce((n, e) => n + e.lies, 0),
+    caught: played.reduce((n, e) => n + e.caught, 0),
+    gemini: played.filter((e) => e.source === 'gemini').length,
+    // A random pick among a player's answers is right one time in that many.
+    chance: options.reduce((sum, n) => sum + 1 / Math.max(1, n), 0) / options.length,
   };
 }
 

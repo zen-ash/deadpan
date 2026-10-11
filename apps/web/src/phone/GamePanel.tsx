@@ -1,4 +1,4 @@
-import { ANSWER_CAP_MS, type GameState, type TurnInfo, type Verdict } from '@deadpan/shared';
+import { ANSWER_CAP_MS, type GameState, type ImposterVerdict, type TruthsVerdict, type TurnInfo } from '@deadpan/shared';
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { FingerprintIcon, headline, withPeriod } from '../ui';
 import { MicBars } from './MicBars';
@@ -9,9 +9,11 @@ interface Props {
   playerId: string | null;
   /** A player's name, including players who have left. */
   name(id: string): string;
-  /** undefined until dealt; null means this player is the imposter. */
+  /** Imposter: undefined until dealt; null means this player is the imposter. */
   secret: string | null | undefined;
-  verdict: Verdict | null;
+  /** Two Truths and a Lie: which of this player's questions to lie on, once dealt. */
+  lie: Lie | undefined;
+  verdict: ImposterVerdict | TruthsVerdict | null;
   /** The face has been out of the camera's view for a moment. */
   faceLost: boolean;
   analyser: AnalyserNode | null;
@@ -21,21 +23,47 @@ interface Props {
   children?: ReactNode;
 }
 
+export interface Lie {
+  question: number;
+  of: number;
+}
+
 /** What the phone shows during a round it's playing in. */
-export function GamePanel({ code, game, playerId, name, secret, verdict, faceLost, analyser, serverNow, onDone, children }: Props) {
+export function GamePanel({ code, game, playerId, name, secret, lie, verdict, faceLost, analyser, serverNow, onDone, children }: Props) {
   const turn = game.turn;
   const caseNo = `No. ${code}-${game.round}`;
+  // What the case file says when it's held open: the word or the imposter's role, or which answer to lie on.
+  const orders = lie ? <LieOrders lie={lie} /> : secret !== undefined ? <WordOrders secret={secret} /> : null;
+  const truths = verdict?.mode === 'truths' ? verdict : null;
+  const imposter = verdict && verdict.mode !== 'truths' ? verdict : null;
+  const myPick = truths?.picks.find((p) => p.playerId === playerId);
 
   let screen: ReactNode;
   if (game.phase === 'verdict') {
-    if (game.verdictStage === 'revealed' && verdict) {
-      screen = <Result code={code} verdict={verdict} playerId={playerId} name={name} />;
-    } else if (game.verdictStage === 'accusing' && verdict) {
+    if (game.verdictStage === 'revealed' && truths) {
+      screen = <TruthsResult code={code} verdict={truths} playerId={playerId} />;
+    } else if (game.verdictStage === 'revealed' && imposter) {
+      screen = <Result code={code} verdict={imposter} playerId={playerId} name={name} />;
+    } else if (game.verdictStage === 'accusing' && truths) {
+      screen = (
+        <>
+          <p className="eyebrow">Verdict · Round {game.round}</p>
+          {myPick ? (
+            <>
+              <p className="result-accused">The detective’s pick for you</p>
+              <h1 className="result-name longer">Question {myPick.picked}.</h1>
+            </>
+          ) : (
+            <h1 className="phone-title waiting-title">The detective names the lies.</h1>
+          )}
+        </>
+      );
+    } else if (game.verdictStage === 'accusing' && imposter) {
       screen = (
         <>
           <p className="eyebrow">Verdict · Round {game.round}</p>
           <p className="result-accused">The detective accuses</p>
-          <h1 className={`result-name ${lengthClass(name(verdict.accusedId), 5, 9)}`}>{withPeriod(name(verdict.accusedId))}</h1>
+          <h1 className={`result-name ${lengthClass(name(imposter.accusedId), 5, 9)}`}>{withPeriod(name(imposter.accusedId))}</h1>
         </>
       );
     } else {
@@ -48,14 +76,14 @@ export function GamePanel({ code, game, playerId, name, secret, verdict, faceLos
       );
     }
   } else if (turn && turn.playerId === playerId) {
-    screen = <MyTurn turn={turn} faceLost={faceLost} analyser={analyser} serverNow={serverNow} onDone={onDone} />;
+    screen = <MyTurn turn={turn} lie={lie} faceLost={faceLost} analyser={analyser} serverNow={serverNow} onDone={onDone} />;
   } else if (game.phase === 'deal') {
     screen = (
       <>
-        <h1 className="phone-title">Check your secret.</h1>
+        <h1 className="phone-title">{game.mode === 'truths' ? 'Check your orders.' : 'Check your secret.'}</h1>
         <p className="phone-sub">Don’t let anyone see it.</p>
-        {secret !== undefined && <CaseFile secret={secret} caseNo={caseNo} />}
-        {secret !== undefined && <p className="hold-note">Let go to hide it again.</p>}
+        {orders && <CaseFile caseNo={caseNo}>{orders}</CaseFile>}
+        {orders && <p className="hold-note">Let go to hide it again.</p>}
       </>
     );
   } else {
@@ -64,7 +92,11 @@ export function GamePanel({ code, game, playerId, name, secret, verdict, faceLos
       <>
         <h1 className="phone-title">{title}</h1>
         <p className="phone-sub">{sub}</p>
-        {secret !== undefined && <CaseFile secret={secret} caseNo={caseNo} short />}
+        {orders && (
+          <CaseFile caseNo={caseNo} short>
+            {orders}
+          </CaseFile>
+        )}
       </>
     );
   }
@@ -99,12 +131,14 @@ const ARC = 2 * Math.PI * ARC_R;
 
 function MyTurn({
   turn,
+  lie,
   faceLost,
   analyser,
   serverNow,
   onDone,
 }: {
   turn: TurnInfo;
+  lie: Lie | undefined;
   faceLost: boolean;
   analyser: AnalyserNode | null;
   serverNow(): number;
@@ -128,14 +162,19 @@ function MyTurn({
     turn.kind === 'baseline'
       ? 'Calibration · Answer naturally'
       : turn.kind === 'followup'
-        ? 'Follow-up · Just you'
-        : `Your turn · Question ${turn.index} of ${turn.total}`;
+        ? lie
+          ? 'Follow-up · Stick to your story'
+          : 'Follow-up · Just you'
+        : turn.seq && lie
+          ? `Your turn · Question ${turn.seq} of ${lie.of}`
+          : `Your turn · Question ${turn.index} of ${turn.total}`;
 
   return (
     <>
       <p className="eyebrow ask-eyebrow">{eyebrow}</p>
       <h1 className={`ask-question ${lengthClass(turn.text, 70, 130)}`}>“{turn.text}”</h1>
       <p className="ask-hint">{turn.stage === 'asking' ? 'Listen to the detective.' : turn.stage === 'answering' ? 'Answer out loud.' : 'Got it.'}</p>
+      {turn.kind === 'question' && turn.seq && lie && <LieCheck key={turn.id} lying={turn.seq === lie.question} />}
       {faceLost && <p className="banner warn">Keep your face in the camera.</p>}
       {/* The ring takes whatever height is left under the camera and the question. */}
       <div className="done-wrap">
@@ -186,8 +225,66 @@ function MyTurn({
   );
 }
 
-/** The secret word (or the imposter's role), readable only while it's pressed and held. */
-function CaseFile({ secret, caseNo, short = false }: { secret: string | null; caseNo: string; short?: boolean }) {
+/**
+ * Whether this answer is the one to lie on, shown only while it's held, like the case file, so
+ * nobody beside the player can read it.
+ */
+function LieCheck({ lying }: { lying: boolean }) {
+  const [shown, setShown] = useState(false);
+  const hide = () => setShown(false);
+  const onKey = (e: KeyboardEvent, down: boolean) => {
+    if (e.key !== ' ' && e.key !== 'Enter') return;
+    e.preventDefault();
+    setShown(down);
+  };
+  return (
+    <button
+      className={`lie-check ${shown ? (lying ? 'open lie' : 'open') : ''}`}
+      aria-label={shown ? (lying ? 'Lie on this one.' : 'Tell the truth on this one.') : 'Press and hold to check: truth or lie'}
+      onPointerDown={() => setShown(true)}
+      onPointerUp={hide}
+      onPointerLeave={hide}
+      onPointerCancel={hide}
+      onKeyDown={(e) => onKey(e, true)}
+      onKeyUp={(e) => onKey(e, false)}
+      onBlur={hide}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {shown ? (lying ? 'Lie on this one.' : 'Tell the truth.') : 'Hold to check: truth or lie?'}
+    </button>
+  );
+}
+
+/** Imposter: the secret word, or the imposter's role. */
+function WordOrders({ secret }: { secret: string | null }) {
+  return secret === null ? (
+    <span className="casefile-content">
+      <span className="casefile-kicker">Your role</span>
+      <span className="casefile-role">You’re the imposter.</span>
+      <span className="casefile-small">You don’t get the word. Listen to the others, then bluff.</span>
+    </span>
+  ) : (
+    <span className="casefile-content">
+      <span className="casefile-kicker">The word</span>
+      <span className={`casefile-word ${lengthClass(secret, 6, 9)}`}>{headline(secret)}</span>
+      <span className="casefile-small">Keep it to yourself.</span>
+    </span>
+  );
+}
+
+/** Two Truths and a Lie: which answer to make up. */
+function LieOrders({ lie }: { lie: Lie }) {
+  return (
+    <span className="casefile-content">
+      <span className="casefile-kicker">Your orders</span>
+      <span className="casefile-role">Lie on question {lie.question}.</span>
+      <span className="casefile-small">Tell the truth on the other {lie.of - 1 === 2 ? 'two' : lie.of - 1}. Make this one up, and sell it.</span>
+    </span>
+  );
+}
+
+/** The player's secret, readable only while it's pressed and held. */
+function CaseFile({ caseNo, short = false, children }: { caseNo: string; short?: boolean; children: ReactNode }) {
   const [shown, setShown] = useState(false);
   const hide = () => setShown(false);
   const onKey = (e: KeyboardEvent, down: boolean) => {
@@ -214,24 +311,12 @@ function CaseFile({ secret, caseNo, short = false }: { secret: string | null; ca
           <span className="stamp-mini">Top secret</span>
           <span className="casefile-no">{caseNo}</span>
         </span>
-        {!shown && (
+        {shown ? (
+          children
+        ) : (
           <span className="casefile-content">
             <FingerprintIcon />
             <span className="casefile-hint">Press and hold to read</span>
-          </span>
-        )}
-        {shown && secret === null && (
-          <span className="casefile-content">
-            <span className="casefile-kicker">Your role</span>
-            <span className="casefile-role">You’re the imposter.</span>
-            <span className="casefile-small">You don’t get the word. Listen to the others, then bluff.</span>
-          </span>
-        )}
-        {shown && secret !== null && (
-          <span className="casefile-content">
-            <span className="casefile-kicker">The word</span>
-            <span className={`casefile-word ${lengthClass(secret, 6, 9)}`}>{headline(secret)}</span>
-            <span className="casefile-small">Keep it to yourself.</span>
           </span>
         )}
       </button>
@@ -239,7 +324,51 @@ function CaseFile({ secret, caseNo, short = false }: { secret: string | null; ca
   );
 }
 
-function Result({ code, verdict, playerId, name }: { code: string; verdict: Verdict; playerId: string | null; name(id: string): string }) {
+function ReplayLink({ code, round }: { code: string; round: number }) {
+  return (
+    <p>
+      {/* A new tab, so this one stays in the room for the next round. */}
+      <a className="replay-link" href={`/host/${code}?demo=${round}&from=phone`} target="_blank" rel="noopener">
+        Watch the replay →
+      </a>
+    </p>
+  );
+}
+
+function TruthsResult({ code, verdict, playerId }: { code: string; verdict: TruthsVerdict; playerId: string | null }) {
+  const mine = verdict.picks.find((p) => p.playerId === playerId);
+  const n = verdict.picks.length;
+  return (
+    <>
+      <p className="eyebrow">Verdict · Round {verdict.round}</p>
+      {mine ? (
+        <>
+          <p className="result-accused">The detective picked</p>
+          <h1 className="result-name longer">Question {mine.picked}.</h1>
+          <span className={`stamp ${mine.correct ? '' : 'cleared'}`}>{mine.correct ? 'Caught' : 'Fooled'}</span>
+          <p className="result-line">
+            Your lie was question {mine.lie}
+            {mine.questions[mine.lie - 1] ? <>: “{mine.questions[mine.lie - 1]}”</> : '.'}
+          </p>
+        </>
+      ) : (
+        // Dropped out before their lie, so there was nothing to judge.
+        <h1 className="phone-title waiting-title">You sat this verdict out.</h1>
+      )}
+      <div className="result-card">
+        <p className="display">{mine ? (mine.correct ? 'You got caught.' : 'You fooled the detective.') : 'Next round, then.'}</p>
+        {n > 1 && (
+          <p>
+            The detective found {verdict.caught} of {n} lies.
+          </p>
+        )}
+        <ReplayLink code={code} round={verdict.round} />
+      </div>
+    </>
+  );
+}
+
+function Result({ code, verdict, playerId, name }: { code: string; verdict: ImposterVerdict; playerId: string | null; name(id: string): string }) {
   const accused = name(verdict.accusedId);
   const imposter = name(verdict.imposterId);
   const wasImposter = playerId === verdict.imposterId;
@@ -264,12 +393,7 @@ function Result({ code, verdict, playerId, name }: { code: string; verdict: Verd
       </p>
       <div className="result-card">
         <p className="display">{personal}</p>
-        <p>
-          {/* A new tab, so this one stays in the room for the next round. */}
-          <a className="replay-link" href={`/host/${code}?demo=${verdict.round}&from=phone`} target="_blank" rel="noopener">
-            Watch the replay →
-          </a>
-        </p>
+        <ReplayLink code={code} round={verdict.round} />
       </div>
     </>
   );

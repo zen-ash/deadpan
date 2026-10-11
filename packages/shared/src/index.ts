@@ -51,6 +51,14 @@ export function normalizeRoomCode(raw: string): string | null {
 
 export type Phase = 'lobby' | 'baseline' | 'deal' | 'question' | 'followup' | 'verdict' | 'replay';
 
+/**
+ * imposter: everyone but one player gets the secret word. truths (Two Truths and a Lie): the
+ * detective asks everyone TRUTHS_QUESTIONS questions about themselves, and each player is secretly
+ * told to lie on one of their answers.
+ */
+export type GameMode = 'imposter' | 'truths';
+export const TRUTHS_QUESTIONS = 3;
+
 // Turn timing: an answer ends on "done", after a stretch of silence, or at a 15 s cap.
 export const ANSWER_CAP_MS = 15_000;
 /**
@@ -144,6 +152,10 @@ export interface TurnInfo {
   /** 1-based position of this turn within its phase, and the phase's turn count. */
   index: number;
   total: number;
+  /** Two Truths and a Lie: which of this player's own questions this is (1-based). */
+  seq?: number;
+  /** Two Truths and a Lie: the question a follow-up presses on. */
+  about?: number;
   /** Server time the line finished playing, once the answer has started. */
   questionEnd: number | null;
   /** Server time the answer is cut off at the latest. */
@@ -155,6 +167,8 @@ export type VerdictStage = 'deliberating' | 'accusing' | 'revealed';
 
 export interface GameState {
   phase: Phase;
+  /** Missing in rounds recorded before Two Truths and a Lie, which were all Imposter. */
+  mode: GameMode;
   round: number;
   /** Players in this round. Anyone who joins mid-round waits for the next one. */
   roundPlayers: string[];
@@ -218,6 +232,9 @@ export interface AnswerResult {
   playerId: string;
   kind: TurnKind;
   question: string;
+  /** Two Truths and a Lie: as in TurnInfo. */
+  seq?: number;
+  about?: number;
   metrics: AnswerMetrics;
   /** Null for baseline answers, which define calm. */
   z: AnswerZ | null;
@@ -233,7 +250,9 @@ export interface PlayerScore {
   combined: number;
 }
 
-export interface Verdict {
+export interface ImposterVerdict {
+  /** Missing in rounds recorded before Two Truths and a Lie. */
+  mode?: 'imposter';
   round: number;
   word: string;
   imposterId: string;
@@ -247,6 +266,35 @@ export interface Verdict {
   /** The spoken accusation, as subtitles. */
   spoken: string;
 }
+
+/** Two Truths and a Lie: the answer the detective thinks one player lied on. */
+export interface LiePick {
+  playerId: string;
+  /** Their questions, in order (subtitle text). */
+  questions: string[];
+  /** 1-based: the question they were told to lie on, and the one the detective picked. */
+  lie: number;
+  picked: number;
+  correct: boolean;
+  /** Why the detective picked it, in one short line. */
+  why: string;
+}
+
+export interface TruthsVerdict {
+  mode: 'truths';
+  round: number;
+  /** One per player who told their lie (a player who dropped out before it isn't judged). */
+  picks: LiePick[];
+  /** How many picks were right. */
+  caught: number;
+  source: 'local' | 'gemini';
+  /** 0–1, from Gemini; null for the local fallback. */
+  confidence: number | null;
+  /** The spoken verdict, as subtitles. */
+  spoken: string;
+}
+
+export type Verdict = ImposterVerdict | TruthsVerdict;
 
 export type ClientToServer =
   // `resume` (from an earlier welcome) takes back the same player after a dropped connection or a reload.
@@ -265,7 +313,7 @@ export type HostToServer =
   | { t: 'host_join'; room: string }
   /** `at` is when playback ended, in server time. */
   | { t: 'tts_end'; lineId: string; at: number }
-  | { t: 'start_round' }
+  | { t: 'start_round'; mode?: GameMode }
   /** Back to the lobby: after the verdict, or to abandon a round. */
   | { t: 'end_round' }
   /** The camera view opened or closed; phones send full landmark frames while any host has it open. */
@@ -281,6 +329,8 @@ export type ServerToClient =
   | { t: 'pong'; c: number; s: number }
   | ({ t: 'state' } & GameState)
   | { t: 'secret'; word: string | null } // null = imposter
+  // Two Truths and a Lie: which of this player's questions to lie on (1-based), out of how many.
+  | { t: 'your_lie'; question: number; of: number }
   // To the active phone. The Scribe socket opens while the question plays, but audio only
   // streams once the answer starts.
   | { t: 'scribe'; turnId: string; url: string }
@@ -311,18 +361,26 @@ export type RoundSample = [number, number, number, number, number, number, numbe
 export interface RoundSummary {
   room: string;
   round: number;
+  /** Missing for rounds from before Two Truths and a Lie. */
+  mode?: GameMode;
   startedAt: number;
   endedAt: number;
   players: string[];
   word: string | null;
-  /** Whether the detective caught the imposter; null without a verdict. */
+  /** Whether the detective caught the imposter; null without a verdict, or in Two Truths and a Lie. */
   caught: boolean | null;
+  /** Two Truths and a Lie: how many lies the detective found. */
+  lies?: { caught: number; total: number };
   /** Recorded with demo mode's event log, so it can be played back (not just shown as evidence). */
   replayable: boolean;
 }
 
 /** One line of rounds.jsonl: how a finished round went, for the accuracy stat. */
-export interface RoundLogEntry {
+export type RoundLogEntry = ImposterLogEntry | TruthsLogEntry;
+
+export interface ImposterLogEntry {
+  /** Missing in lines written before Two Truths and a Lie. */
+  mode?: 'imposter';
   at: number;
   room: string;
   round: number;
@@ -331,6 +389,21 @@ export interface RoundLogEntry {
   imposter: string;
   accused: string;
   correct: boolean;
+  source: 'local' | 'gemini';
+  confidence: number | null;
+}
+
+export interface TruthsLogEntry {
+  mode: 'truths';
+  at: number;
+  room: string;
+  round: number;
+  players: number;
+  /** Lies judged, and how many the detective found. */
+  lies: number;
+  caught: number;
+  /** Answers each judged player gave (usually 3), so chance is the mean of 1 / options. */
+  options: number[];
   source: 'local' | 'gemini';
   confidence: number | null;
 }
@@ -349,6 +422,8 @@ export interface RoundTurn {
   kind: TurnKind;
   playerId: string;
   question: string;
+  seq?: number;
+  about?: number;
   askedAt: number;
   questionEnd: number | null;
   answerEnd: number | null;
@@ -365,10 +440,14 @@ export interface RoundFile {
   version: 1;
   room: string;
   round: number;
+  /** Missing for rounds from before Two Truths and a Lie. */
+  mode?: GameMode;
   startedAt: number;
   endedAt: number;
   word: string | null;
   imposterId: string | null;
+  /** Two Truths and a Lie: the question each player was told to lie on (1-based). */
+  lies?: Record<string, number>;
   players: { id: string; name: string; slot: number }[];
   turns: RoundTurn[];
   answers: AnswerResult[];

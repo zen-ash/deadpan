@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type {
   AnswerResult,
   FeaturesPacket,
+  GameMode,
   RoundEvent,
   RoundFile,
   RoundLogEntry,
@@ -145,14 +146,17 @@ export function listRounds(room?: string): RoundSummary[] {
 function summarize(path: string): RoundSummary | null {
   try {
     const r = JSON.parse(readFileSync(path, 'utf8')) as RoundFile;
+    const v = r.verdict;
     return {
       room: r.room,
       round: r.round,
+      mode: r.mode ?? 'imposter',
       startedAt: r.startedAt,
       endedAt: r.endedAt,
       players: r.players.map((p) => p.name),
       word: r.word,
-      caught: r.verdict ? r.verdict.correct : null,
+      caught: v && v.mode !== 'truths' ? v.correct : null,
+      ...(v?.mode === 'truths' ? { lies: { caught: v.caught, total: v.picks.length } } : {}),
       replayable: !!r.events?.length,
     };
   } catch {
@@ -168,11 +172,12 @@ export class RoundRecorder {
   /** The file is written, so the recording is complete. */
   saved = false;
 
-  constructor(room: string, round: number, players: { id: string; name: string; slot: number }[]) {
+  constructor(room: string, round: number, mode: GameMode, players: { id: string; name: string; slot: number }[]) {
     this.data = {
       version: 1,
       room,
       round,
+      mode,
       startedAt: Date.now(),
       endedAt: 0,
       word: null,
@@ -241,12 +246,19 @@ export class RoundRecorder {
     this.data.imposterId = imposterId;
   }
 
+  /** Two Truths and a Lie: the question each player was told to lie on. */
+  lies(lies: Record<string, number>) {
+    this.data.lies = lies;
+  }
+
   turnStarted(info: TurnInfo) {
     this.data.turns.push({
       id: info.id,
       kind: info.kind,
       playerId: info.playerId,
       question: info.text,
+      seq: info.seq,
+      about: info.about,
       askedAt: Date.now(),
       questionEnd: null,
       answerEnd: null,

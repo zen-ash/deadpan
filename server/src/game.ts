@@ -1,6 +1,8 @@
-// The Imposter round, run by the server as one script:
+// A round, run by the server as one script:
 // intro → baseline → deal → (question → answer) × 2 per player → Gemini follow-up →
 // drumroll while Gemini decides → spoken verdict → reveal.
+// Two Truths and a Lie runs the same script: the deal tells each player which of their questions
+// to lie on, everyone gets 3 questions about themselves, and the verdict names each player's lie.
 // Every wait has a timeout, and ending the round cancels whatever is pending, so a round always
 // finishes even if the big screen, Scribe, Gemini or ElevenLabs goes quiet.
 import { randomUUID } from 'node:crypto';
@@ -9,15 +11,20 @@ import {
   DEAL_MS,
   MIN_RESPONSE_MS,
   SILENCE_END_MS,
+  TRUTHS_QUESTIONS,
   type AnswerResult,
   type ClientToServer,
   type FeaturesPacket,
+  type GameMode,
+  type ImposterVerdict,
   type RoundEvent,
   type RoundFile,
+  type RoundLogEntry,
   type SfxName,
   type GameState,
   type Phase,
   type TranscriptWord,
+  type TruthsVerdict,
   type TurnInfo,
   type TurnKind,
   type Verdict,
@@ -26,10 +33,28 @@ import {
 import type { WebSocket } from 'ws';
 import { canned, dynamic, sfxMs, type Line } from './audio';
 import * as detective from './detective';
-import { BASELINE, CASE_CLOSED, DEAL, FOLLOWUP_FALLBACKS, HEARD_ENOUGH, HMM, QUESTIONS, VERDICT_FALLBACKS, YOU_GOT_ME, intro, pick } from './lines';
+import {
+  BASELINE,
+  CASE_CLOSED,
+  DEAL,
+  FOLLOWUP_FALLBACKS,
+  HEARD_ENOUGH,
+  HMM,
+  LIFE_QUESTIONS,
+  QUESTIONS,
+  SOME_GOT_AWAY,
+  TRUTHS_DEAL,
+  TRUTHS_FOLLOWUP_FALLBACKS,
+  TRUTHS_VERDICT_FALLBACKS,
+  VERDICT_FALLBACKS,
+  YOU_GOT_ME,
+  intro,
+  pick,
+  truthsIntro,
+} from './lines';
 import { lastSavedRound, logRound, RoundRecorder } from './recorder';
 import { broadcast, send, sendToHosts, type Player, type Room } from './room';
-import { answerMetrics, buildBaseline, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
+import { answerMetrics, buildBaseline, localTruthsVerdict, localVerdict, meanDelivery, scoreAnswer, type Baseline, type Window } from './scoring';
 import { scribeUrl } from './scribe';
 import { pickWord, shuffled } from './words';
 
@@ -51,6 +76,8 @@ interface PlannedTurn {
   line: Line;
   index: number;
   total: number;
+  seq?: number;
+  about?: number;
   /** Runs the moment the answer ends, before the final transcript and scoring. */
   onAnswerEnd?: () => void;
 }
@@ -73,14 +100,21 @@ interface ActiveTurn {
   onAnswerEnd?: () => void;
 }
 
-export class ImposterGame {
+/** A follow-up ready to ask; in Two Truths and a Lie, `about` is the question it presses on. */
+type FollowUpTurn = { playerId: string; line: Line; about?: number };
+
+export class Game {
   private phase: Phase = 'lobby';
+  private mode: GameMode = 'imposter';
   private round = 0;
   private roundPlayers: string[] = [];
   private dealEndsAt: number | null = null;
   private verdictStage: VerdictStage | null = null;
   private word: string | null = null;
   private imposterId: string | null = null;
+  /** Two Truths and a Lie: the question each player lies on (1-based), and the questions they're asked. */
+  private readonly lies = new Map<string, number>();
+  private readonly asked = new Map<string, string[]>();
   private turn: ActiveTurn | null = null;
   private answers: AnswerResult[] = [];
   private readonly baselineWindows = new Map<string, Window[]>();
@@ -101,6 +135,7 @@ export class ImposterGame {
   get state(): GameState {
     return {
       phase: this.phase,
+      mode: this.mode,
       round: this.round,
       roundPlayers: this.roundPlayers,
       turn: this.turn?.info ?? null,
@@ -133,6 +168,8 @@ export class ImposterGame {
   onPlayerBack(player: Player) {
     if (!this.isPlaying(player.id)) return;
     if (this.word && this.imposterId) send(player.ws, { t: 'secret', word: player.id === this.imposterId ? null : this.word });
+    const lie = this.lies.get(player.id);
+    if (lie) send(player.ws, { t: 'your_lie', question: lie, of: TRUTHS_QUESTIONS });
     const turn = this.turn;
     if (!turn || turn.info.playerId !== player.id) return;
     if (turn.info.stage === 'answering') {
@@ -147,7 +184,7 @@ export class ImposterGame {
   }
 
   /** Starts a round with everyone in the room. Returns an error message if it can't. */
-  start(): string | null {
+  start(mode: GameMode = 'imposter'): string | null {
     if (this.phase !== 'lobby' && this.phase !== 'verdict') return 'A round is already running.';
     // A phone that's mid-reconnect sits this one out.
     const players = [...this.room.players.values()].filter((p) => p.online);
@@ -155,12 +192,13 @@ export class ImposterGame {
 
     this.cancelRun();
     this.reset();
+    this.mode = mode;
     this.round++;
     this.roundPlayers = players.map((p) => p.id);
-    this.recorder = new RoundRecorder(this.room.code, this.round, players.map(({ id, name, slot }) => ({ id, name, slot })));
+    this.recorder = new RoundRecorder(this.room.code, this.round, mode, players.map(({ id, name, slot }) => ({ id, name, slot })));
     const run: Run = { id: this.round, aborted: false };
     this.run = run;
-    this.log(`round ${this.round} started with ${players.map((p) => p.name).join(', ')}`);
+    this.log(`${mode === 'truths' ? 'two truths' : 'imposter'} round ${this.round} started with ${players.map((p) => p.name).join(', ')}`);
     void this.play(run).catch((err: unknown) => {
       console.error(`[room ${this.room.code}] round crashed:`, err);
       if (this.run === run) this.end();
@@ -198,9 +236,10 @@ export class ImposterGame {
 
   private async play(run: Run) {
     const live = () => this.run === run && !run.aborted;
+    const truths = this.mode === 'truths';
 
     this.setPhase('baseline');
-    await this.say(run, canned(intro(this.roundPlayers.length)));
+    await this.say(run, canned((truths ? truthsIntro : intro)(this.roundPlayers.length)));
     const softballs = shuffled(BASELINE);
     const calibrating = [...this.roundPlayers];
     for (const [i, playerId] of calibrating.entries()) {
@@ -210,23 +249,15 @@ export class ImposterGame {
 
     if (!live()) return;
     if (!this.deal()) return this.end();
-    await Promise.all([this.say(run, canned(DEAL)), this.sleep(run, DEAL_MS)]);
+    await Promise.all([this.say(run, canned(truths ? TRUTHS_DEAL : DEAL)), this.sleep(run, DEAL_MS)]);
 
     if (!live()) return;
     this.dealEndsAt = null;
     this.setPhase('question');
-    const pool = shuffled(QUESTIONS);
-    // Round-robin, so everyone answers once before anyone answers twice.
-    const questions: PlannedTurn[] = [];
-    for (let r = 0; r < QUESTIONS_PER_PLAYER; r++) {
-      for (const playerId of this.roundPlayers) {
-        questions.push({ kind: 'question', playerId, line: canned(pool[questions.length % pool.length]!), index: questions.length + 1, total: 0 });
-      }
-    }
-    for (const q of questions) q.total = questions.length;
+    const questions = this.planQuestions();
 
     // The follow-up call starts the moment the last regular answer ends, with a "hmm" over it.
-    let thinking: Promise<[{ playerId: string; line: Line } | null, number]> | null = null;
+    let thinking: Promise<[FollowUpTurn | null, number]> | null = null;
     const startThinking = () => {
       thinking ??= Promise.all([this.prepareFollowUp(), this.say(run, canned(pick(HMM)))]);
     };
@@ -248,16 +279,52 @@ export class ImposterGame {
     await this.decide(run);
   }
 
+  /**
+   * The regular questions, round-robin so everyone answers once before anyone answers twice.
+   * Imposter: 2 each about the word. Two Truths and a Lie: 3 each about themselves, none repeated.
+   */
+  private planQuestions(): PlannedTurn[] {
+    const truths = this.mode === 'truths';
+    const pool = shuffled(truths ? LIFE_QUESTIONS : QUESTIONS);
+    const questions: PlannedTurn[] = [];
+    for (let r = 0; r < (truths ? TRUTHS_QUESTIONS : QUESTIONS_PER_PLAYER); r++) {
+      for (const playerId of this.roundPlayers) {
+        const line = canned(pool[questions.length % pool.length]!);
+        if (truths) this.asked.set(playerId, [...(this.asked.get(playerId) ?? []), line.text]);
+        questions.push({ kind: 'question', playerId, line, index: questions.length + 1, total: 0, seq: truths ? r + 1 : undefined });
+      }
+    }
+    for (const q of questions) q.total = questions.length;
+    return questions;
+  }
+
   /** Gemini picks who to grill and writes the line; the fallback grills whoever drifted most. */
-  private async prepareFollowUp(): Promise<{ playerId: string; line: Line } | null> {
+  private async prepareFollowUp(): Promise<FollowUpTurn | null> {
     const fromGemini = await detective.followUp(this.context());
     if (fromGemini && this.roundPlayers.includes(fromGemini.targetId)) {
       const line = await dynamic(fromGemini.spoken);
-      return { playerId: fromGemini.targetId, line: line ?? canned(pick(FOLLOWUP_FALLBACKS)) };
+      return line ? { playerId: fromGemini.targetId, line, about: fromGemini.about } : this.cannedFollowUp(fromGemini.targetId);
     }
+    if (this.mode === 'truths') return this.truthsFallbackFollowUp();
     const scored = this.answers.filter((a) => a.kind === 'question');
     const ranked = shuffled(this.roundPlayers).sort((a, b) => (meanDelivery(scored, b) ?? -Infinity) - (meanDelivery(scored, a) ?? -Infinity));
-    return ranked[0] ? { playerId: ranked[0], line: canned(pick(FOLLOWUP_FALLBACKS)) } : null;
+    return ranked[0] ? this.cannedFollowUp(ranked[0]) : null;
+  }
+
+  /** A canned follow-up. In Two Truths and a Lie these press on the player's last answer. */
+  private cannedFollowUp(playerId: string): FollowUpTurn {
+    if (this.mode !== 'truths') return { playerId, line: canned(pick(FOLLOWUP_FALLBACKS)) };
+    const last = this.context().answers.findLast((a) => a.playerId === playerId && a.kind === 'question');
+    return { playerId, line: canned(pick(TRUTHS_FOLLOWUP_FALLBACKS)), about: last?.seq };
+  }
+
+  /** Two Truths and a Lie without Gemini: press on the answer that drifted furthest, reading its question back. */
+  private async truthsFallbackFollowUp(): Promise<FollowUpTurn | null> {
+    const told = this.context().answers.filter((a) => a.kind === 'question' && a.seq !== undefined && this.roundPlayers.includes(a.playerId));
+    const top = shuffled(told).sort((a, b) => (b.delivery ?? -Infinity) - (a.delivery ?? -Infinity))[0];
+    if (!top) return null;
+    const line = await dynamic(`[skeptical] ${this.name(top.playerId)}. Back to this one. [pause] "${top.question}" [low] Details, this time.`);
+    return line ? { playerId: top.playerId, line, about: top.seq } : this.cannedFollowUp(top.playerId);
   }
 
   /**
@@ -268,34 +335,15 @@ export class ImposterGame {
     const live = () => this.run === run && !run.aborted;
     this.verdictStage = 'deliberating';
     this.setPhase('verdict');
-    const players = this.roundPlayers.map((id) => ({ id, name: this.name(id) }));
-    const local = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
-    const deciding = detective.verdict(this.context(), local.scores);
+    const deciding = this.mode === 'truths' ? this.decideTruths() : this.decideImposter();
     await this.say(run, canned(HEARD_ENOUGH));
     if (!live()) return;
 
     this.sfx('drumroll');
-    const [fromGemini] = await Promise.all([deciding, this.sleep(run, sfxMs('drumroll'))]);
+    const [{ verdict, spoken }] = await Promise.all([deciding, this.sleep(run, sfxMs('drumroll'))]);
     if (!live()) return;
 
-    let verdict: Verdict;
-    let spoken: string;
-    if (fromGemini) {
-      spoken = fromGemini.spoken;
-      verdict = {
-        ...local,
-        accusedId: fromGemini.accusedId,
-        correct: fromGemini.accusedId === this.imposterId,
-        source: 'gemini',
-        confidence: fromGemini.confidence,
-        evidence: fromGemini.evidence.length > 0 ? fromGemini.evidence : local.evidence,
-        spoken: '',
-      };
-    } else {
-      spoken = `[low, gravelly] I've watched every one of you. [pause] The imposter... is ${this.name(local.accusedId)}.`;
-      verdict = local;
-    }
-    const line = (await dynamic(spoken)) ?? canned(pick(VERDICT_FALLBACKS));
+    const line = (await dynamic(spoken)) ?? canned(pick(verdict.mode === 'truths' ? TRUTHS_VERDICT_FALLBACKS : VERDICT_FALLBACKS));
     if (!live()) return;
     verdict.spoken = line.text;
     this.verdict = verdict;
@@ -309,26 +357,90 @@ export class ImposterGame {
     this.verdictStage = 'revealed';
     this.broadcastState();
     this.sfx('stinger');
-    await this.say(run, canned(pick(verdict.correct ? CASE_CLOSED : YOU_GOT_ME)));
-    if (verdict.correct && live()) this.sfx('caseclosed');
+    const [found, of] = verdict.mode === 'truths' ? [verdict.caught, verdict.picks.length] : [verdict.correct ? 1 : 0, 1];
+    const sweep = of > 0 && found === of;
+    await this.say(run, canned(pick(sweep ? CASE_CLOSED : found === 0 ? YOU_GOT_ME : SOME_GOT_AWAY)));
+    if (sweep && live()) this.sfx('caseclosed');
     const saved = this.recorder?.save();
     if (saved) this.log(`round saved to ${saved}`);
-    logRound({
-      at: Date.now(),
-      room: this.room.code,
-      round: verdict.round,
+    logRound(this.logEntry(verdict));
+    if (verdict.mode === 'truths') {
+      const picks = verdict.picks.map((p) => `${this.name(p.playerId)} lied on ${p.lie}, picked ${p.picked}`).join('; ');
+      this.log(`verdict (${verdict.source}): found ${verdict.caught} of ${verdict.picks.length} lies (${picks})`);
+    } else {
+      this.log(
+        `verdict (${verdict.source}): accused ${this.name(verdict.accusedId)}, imposter was ${this.name(verdict.imposterId)}, ` +
+          `word "${verdict.word}" (${verdict.correct ? 'caught' : 'missed'})`,
+      );
+    }
+  }
+
+  /** The Imposter verdict: Gemini's accusation, or the local one if Gemini fails. */
+  private async decideImposter(): Promise<{ verdict: ImposterVerdict; spoken: string }> {
+    const players = this.roundPlayers.map((id) => ({ id, name: this.name(id) }));
+    const local = localVerdict(this.round, this.word!, this.imposterId!, players, this.answers, this.baselines);
+    const fromGemini = await detective.verdict(this.context(), local.scores);
+    if (!fromGemini) {
+      return { verdict: local, spoken: `[low, gravelly] I've watched every one of you. [pause] The imposter... is ${this.name(local.accusedId)}.` };
+    }
+    return {
+      verdict: {
+        ...local,
+        accusedId: fromGemini.accusedId,
+        correct: fromGemini.accusedId === this.imposterId,
+        source: 'gemini',
+        confidence: fromGemini.confidence,
+        evidence: fromGemini.evidence.length > 0 ? fromGemini.evidence : local.evidence,
+        spoken: '',
+      },
+      spoken: fromGemini.spoken,
+    };
+  }
+
+  /** The Two Truths and a Lie verdict: Gemini's pick of each player's lie, the local pick for any it skipped. */
+  private async decideTruths(): Promise<{ verdict: TruthsVerdict; spoken: string }> {
+    const players = this.roundPlayers.flatMap((id) => {
+      const lie = this.lies.get(id);
+      return lie ? [{ id, lie, questions: this.asked.get(id) ?? [] }] : [];
+    });
+    const local = localTruthsVerdict(this.round, players, this.answers, this.baselines);
+    const fromGemini = await detective.truthsVerdict(this.context(), local.picks);
+    if (!fromGemini) {
+      const named = local.picks.map((p) => `${this.name(p.playerId)}. Your lie was question ${p.picked}.`).join(' [pause] ');
+      return { verdict: local, spoken: `[low, gravelly] I've heard all your stories. [pause] ${named}` };
+    }
+    const picks = local.picks.map((p) => {
+      const mine = fromGemini.picks.get(p.playerId);
+      return mine ? { ...p, picked: mine.picked, correct: mine.picked === p.lie, why: mine.why || p.why } : p;
+    });
+    return {
+      verdict: { ...local, picks, caught: picks.filter((p) => p.correct).length, source: 'gemini', confidence: fromGemini.confidence },
+      spoken: fromGemini.spoken,
+    };
+  }
+
+  /** The round's line in rounds.jsonl, for the accuracy stat. */
+  private logEntry(verdict: Verdict): RoundLogEntry {
+    const base = { at: Date.now(), room: this.room.code, round: verdict.round, source: verdict.source, confidence: verdict.confidence };
+    if (verdict.mode === 'truths') {
+      return {
+        ...base,
+        mode: 'truths',
+        players: this.roundPlayers.length,
+        lies: verdict.picks.length,
+        caught: verdict.caught,
+        options: verdict.picks.map((p) => this.answers.filter((a) => a.playerId === p.playerId && a.kind === 'question').length),
+      };
+    }
+    return {
+      ...base,
+      mode: 'imposter',
       players: verdict.scores.length,
       word: verdict.word,
       imposter: this.name(verdict.imposterId),
       accused: this.name(verdict.accusedId),
       correct: verdict.correct,
-      source: verdict.source,
-      confidence: verdict.confidence,
-    });
-    this.log(
-      `verdict (${verdict.source}): accused ${this.name(verdict.accusedId)}, imposter was ${this.name(verdict.imposterId)}, ` +
-        `word "${verdict.word}" (${verdict.correct ? 'caught' : 'missed'})`,
-    );
+    };
   }
 
   private deal(): boolean {
@@ -340,12 +452,21 @@ export class ImposterGame {
       const softballs = this.answers.filter((a) => a.playerId === id && a.kind === 'baseline').map((a) => a.metrics);
       this.baselines.set(id, buildBaseline(softballs, player.samples, this.baselineWindows.get(id) ?? [], now));
     }
-    this.word = pickWord();
-    this.imposterId = this.roundPlayers[Math.floor(Math.random() * this.roundPlayers.length)]!;
-    this.recorder?.secret(this.word, this.imposterId);
     this.dealEndsAt = now + DEAL_MS;
-    for (const id of this.roundPlayers) {
-      send(this.room.players.get(id)!.ws, { t: 'secret', word: id === this.imposterId ? null : this.word });
+    if (this.mode === 'truths') {
+      for (const id of this.roundPlayers) {
+        const lie = 1 + Math.floor(Math.random() * TRUTHS_QUESTIONS);
+        this.lies.set(id, lie);
+        send(this.room.players.get(id)!.ws, { t: 'your_lie', question: lie, of: TRUTHS_QUESTIONS });
+      }
+      this.recorder?.lies(Object.fromEntries(this.lies));
+    } else {
+      this.word = pickWord();
+      this.imposterId = this.roundPlayers[Math.floor(Math.random() * this.roundPlayers.length)]!;
+      this.recorder?.secret(this.word, this.imposterId);
+      for (const id of this.roundPlayers) {
+        send(this.room.players.get(id)!.ws, { t: 'secret', word: id === this.imposterId ? null : this.word });
+      }
     }
     this.setPhase('deal');
     return true;
@@ -374,6 +495,8 @@ export class ImposterGame {
         stage: 'asking',
         index: planned.index,
         total: planned.total,
+        seq: planned.seq,
+        about: planned.about,
         questionEnd: null,
         answerDeadline: null,
       },
@@ -520,14 +643,14 @@ export class ImposterGame {
 
   /** Measures an answer against the player's baseline. Works before the final transcript too. */
   private measure(turn: ActiveTurn): AnswerResult | null {
-    const { id, playerId, kind, text } = turn.info;
+    const { id, playerId, kind, text, seq, about } = turn.info;
     const player = this.room.players.get(playerId);
     if (!player || turn.info.questionEnd === null || turn.answerEnd === null) return null;
     const window: Window = { start: turn.info.questionEnd, end: turn.answerEnd };
     const baseline = this.baselines.get(playerId);
     const metrics = answerMetrics(player.samples, player.speech, window, turn.words, turn.text, baseline?.pitchHz ?? null);
     const scored = kind !== 'baseline' && baseline ? scoreAnswer(metrics, baseline) : { z: null, delivery: null };
-    return { turnId: id, playerId, kind, question: text, metrics, ...scored };
+    return { turnId: id, playerId, kind, question: text, seq, about, metrics, ...scored };
   }
 
   // Waiting
@@ -577,6 +700,7 @@ export class ImposterGame {
     const pending = this.turn && this.turn.info.stage === 'scoring' && !this.turn.scored ? this.measure(this.turn) : null;
     if (pending) answers.push(pending);
     return {
+      mode: this.mode,
       word: this.word ?? '',
       players: this.roundPlayers.map((id) => ({ id, name: this.name(id) })),
       answers,
@@ -642,6 +766,8 @@ export class ImposterGame {
     this.verdictStage = null;
     this.word = null;
     this.imposterId = null;
+    this.lies.clear();
+    this.asked.clear();
     this.dealEndsAt = null;
     this.roundPlayers = [];
   }

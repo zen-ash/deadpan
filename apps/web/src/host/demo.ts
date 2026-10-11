@@ -114,7 +114,16 @@ export class DemoSocket implements Link {
 
   private toLobby() {
     this.mode = 'lobby';
-    this.emit({ t: 'state', phase: 'lobby', round: 0, roundPlayers: [], turn: null, dealEndsAt: null, verdictStage: null });
+    this.emit({
+      t: 'state',
+      phase: 'lobby',
+      mode: this.file?.mode ?? 'imposter',
+      round: 0,
+      roundPlayers: [],
+      turn: null,
+      dealEndsAt: null,
+      verdictStage: null,
+    });
   }
 
   private play() {

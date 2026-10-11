@@ -5,9 +5,11 @@ import {
   type AnswerMetrics,
   type AnswerResult,
   type AnswerZ,
+  type ImposterVerdict,
+  type LiePick,
   type PlayerScore,
   type TranscriptWord,
-  type Verdict,
+  type TruthsVerdict,
 } from '@deadpan/shared';
 import type { Sample, SpeechEvent } from './room';
 import { relatedHits, tokens } from './words';
@@ -253,7 +255,7 @@ export function localVerdict(
   players: { id: string; name: string }[],
   answers: AnswerResult[],
   baselines: Map<string, Baseline>,
-): Verdict {
+): ImposterVerdict {
   const scored = answers.filter((a) => a.kind !== 'baseline');
   // Content only counts if everyone has transcripts; otherwise it would favour whoever's mic failed.
   const contentFor = (id: string) => {
@@ -275,6 +277,7 @@ export function localVerdict(
   const accused = leaders[Math.floor(Math.random() * leaders.length)]!;
 
   return {
+    mode: 'imposter',
     round,
     word,
     imposterId,
@@ -323,4 +326,63 @@ function evidenceFor(score: PlayerScore, answers: AnswerResult[], baseline: Base
   lines.sort((a, b) => b.weight - a.weight);
   const out = lines.slice(0, 3).map((l) => l.text);
   return out.length > 0 ? out : ['Drifted furthest from their calm baseline overall'];
+}
+
+/**
+ * Two Truths and a Lie fallback: each player's lie is the answer that drifted furthest from their
+ * own calm baseline. A follow-up that pressed on an answer adds half its drift to that answer.
+ */
+export function localTruthsVerdict(
+  round: number,
+  players: { id: string; lie: number; questions: string[] }[],
+  answers: AnswerResult[],
+  baselines: Map<string, Baseline>,
+): TruthsVerdict {
+  const picks: LiePick[] = [];
+  for (const p of players) {
+    const told = answers.filter((a) => a.playerId === p.id && a.kind === 'question' && a.seq !== undefined);
+    // A player who dropped out before their lie never told it, so there's nothing to find.
+    if (!told.some((a) => a.seq === p.lie)) continue;
+    const followUps = answers.filter((a) => a.playerId === p.id && a.kind === 'followup');
+    const score = (a: AnswerResult) =>
+      (a.delivery ?? 0) + followUps.filter((f) => f.about === a.seq).reduce((sum, f) => sum + 0.5 * (f.delivery ?? 0), 0);
+    const top = Math.max(...told.map(score));
+    const leaders = told.filter((a) => score(a) === top);
+    const picked = leaders[Math.floor(Math.random() * leaders.length)]!;
+    picks.push({
+      playerId: p.id,
+      questions: p.questions,
+      lie: p.lie,
+      picked: picked.seq!,
+      correct: picked.seq === p.lie,
+      why: lieWhy(picked, baselines.get(p.id)),
+    });
+  }
+  return { mode: 'truths', round, picks, caught: picks.filter((p) => p.correct).length, source: 'local', confidence: null, spoken: '' };
+}
+
+/** The strongest sign in one answer, as one short line. */
+function lieWhy(a: AnswerResult, baseline: Baseline | undefined): string {
+  const m = a.metrics;
+  const z = a.z;
+  const lines: { weight: number; text: string }[] = [];
+  if (m.rtMs !== null && z?.rt != null && z.rt > 0.5) {
+    const slower = baseline ? `, ${((m.rtMs - baseline.rt.mean) / 1000).toFixed(1)} s slower than usual` : '';
+    lines.push({ weight: z.rt * WEIGHTS.rt, text: `Took ${(m.rtMs / 1000).toFixed(1)} s to start${slower}` });
+  }
+  if (m.pitchShiftSt !== null && m.pitchShiftSt > 0.8) {
+    lines.push({ weight: (m.pitchShiftSt / MIN_SCALE.pitchSt) * WEIGHTS.pitch, text: `Voice rose ${m.pitchShiftSt.toFixed(1)} semitones` });
+  }
+  if (m.fillers && z?.fillers != null && z.fillers > 0.5) {
+    lines.push({ weight: z.fillers * WEIGHTS.hesitation, text: `${m.fillers} ${m.fillers === 1 ? 'filler' : 'fillers'} in one answer` });
+  }
+  if (m.pauseCount && z?.pauses != null && z.pauses > 0.5) {
+    lines.push({ weight: z.pauses * WEIGHTS.hesitation, text: `Paused ${m.pauseCount} ${m.pauseCount === 1 ? 'time' : 'times'} mid-answer` });
+  }
+  if (z?.blink != null && z.blink > 1 && m.blinkPm !== null) {
+    lines.push({ weight: z.blink * WEIGHTS.blink, text: `Blink rate went to ${m.blinkPm.toFixed(0)} a minute` });
+  }
+  if (z?.lip != null && z.lip > 1) lines.push({ weight: z.lip * WEIGHTS.lip, text: 'Pressed their lips together more than usual' });
+  lines.sort((x, y) => y.weight - x.weight);
+  return lines[0]?.text ?? (a.delivery !== null ? 'Drifted furthest from their calm baseline' : 'A guess: nothing stood out');
 }

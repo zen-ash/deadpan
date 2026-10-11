@@ -71,6 +71,7 @@ export function SuspectCards({ suspects, slots, openSeats, activeId, moment }: P
                 active={activeId === s.player.id && moment !== 'revealed'}
                 benched={s.benched}
                 role={s.role}
+                lie={s.lie}
                 stamp={s.stamp}
               />
             </div>

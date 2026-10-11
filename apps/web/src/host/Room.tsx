@@ -19,6 +19,7 @@ import {
 } from 'three';
 import { FaceMesh } from './FaceMesh';
 import type { Slot } from './layout';
+import type { LieNote } from './SuspectCard';
 
 const CAM_Y = 1.2;
 const CAM_Z = 7;
@@ -32,6 +33,8 @@ export interface SuspectView {
   benched?: boolean;
   /** After the reveal. */
   role?: 'imposter' | 'innocent';
+  /** Two Truths and a Lie, once the verdict is out: the detective's pick, and the real lie after the reveal. */
+  lie?: LieNote;
   /** The stamp on the card's corner after the reveal. */
   stamp?: 'caught' | 'accused' | 'escaped';
 }

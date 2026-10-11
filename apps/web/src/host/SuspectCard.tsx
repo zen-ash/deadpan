@@ -8,6 +8,12 @@ const MYTH_TIP = 'Looking away is not a reliable sign of lying. Shown for fun, n
 /** Where the round is, which decides what the card's corner and sub-line say. */
 export type CardMoment = 'lobby' | 'calibrating' | 'questioning' | 'verdict' | 'revealed';
 
+/** Two Truths and a Lie: the question the detective picked as the lie, and (after the reveal) the real one. */
+export interface LieNote {
+  picked: number;
+  lie: number | null;
+}
+
 interface CardProps {
   player: PlayerInfo;
   /** lobby: name and pulse; full: every signal; compact: the key ones, for 5–6 players; nametag: the name, on a phone. */
@@ -19,6 +25,7 @@ interface CardProps {
   active?: boolean;
   benched?: boolean;
   role?: 'imposter' | 'innocent';
+  lie?: LieNote;
   stamp?: 'caught' | 'accused' | 'escaped';
 }
 
@@ -89,7 +96,7 @@ function Status({ player, live, moment, active, benched, drift }: Pick<CardProps
 }
 
 /** One suspect's card next to their face on the big screen. */
-export function SuspectCard({ player, variant, moment, drift, lastAnswer, active, benched, role, stamp }: CardProps) {
+export function SuspectCard({ player, variant, moment, drift, lastAnswer, active, benched, role, lie, stamp }: CardProps) {
   const p = useLivePlayer(player.id);
   const f = p.features;
   const m = lastAnswer?.metrics;
@@ -120,7 +127,21 @@ export function SuspectCard({ player, variant, moment, drift, lastAnswer, active
     </footer>
   );
   const sub =
-    moment === 'revealed' && role ? (
+    lie && (moment === 'verdict' || moment === 'revealed') ? (
+      <p className="suspect-sub">
+        {lie.lie === null ? (
+          <>Pick: question {lie.picked}</>
+        ) : lie.lie === lie.picked ? (
+          <>
+            Lie: Q{lie.lie} · <span className="hot">Found</span>
+          </>
+        ) : (
+          <>
+            Lie: Q{lie.lie} · Picked Q{lie.picked}
+          </>
+        )}
+      </p>
+    ) : moment === 'revealed' && role ? (
       <p className={`suspect-sub ${role}`}>{role === 'imposter' ? 'The imposter' : 'Innocent'}</p>
     ) : moment === 'calibrating' ? (
       <p className="suspect-sub">Calibrating</p>

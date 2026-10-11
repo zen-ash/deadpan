@@ -44,7 +44,8 @@ export function EvidenceBoard({ room, round, onClose, closeLabel = 'Close' }: Pr
   }, [room, round]);
 
   const name = (id: string) => data?.players.find((p) => p.id === id)?.name ?? '?';
-  const v = data?.verdict;
+  const v = data?.verdict && data.verdict.mode !== 'truths' ? data.verdict : null;
+  const truths = data?.verdict?.mode === 'truths' ? data.verdict : null;
 
   return (
     <section className="board" role="dialog" aria-label="Evidence board">
@@ -53,12 +54,18 @@ export function EvidenceBoard({ room, round, onClose, closeLabel = 'Close' }: Pr
           <p className="eyebrow board-eyebrow">Evidence board</p>
           <h1 className="board-title">
             Round {round}.{data?.word && ` The word was ${data.word}.`}
+            {data?.mode === 'truths' && ' Two truths and a lie.'}
           </h1>
           <ul className="board-chips">
             <li>Room {room}</li>
             {v && <li>Accused: {name(v.accusedId)}</li>}
             {v && <li>Imposter: {name(v.imposterId)}</li>}
             {v && <li className={v.correct ? 'caught' : 'escaped'}>{v.correct ? 'Caught' : 'Escaped'}</li>}
+            {truths && (
+              <li className={truths.caught === truths.picks.length ? 'caught' : truths.caught === 0 ? 'escaped' : ''}>
+                Found {truths.caught} of {truths.picks.length} {truths.picks.length === 1 ? 'lie' : 'lies'}
+              </li>
+            )}
           </ul>
         </div>
         {onClose && (
@@ -175,8 +182,14 @@ function spikeText(answer: AnswerResult | undefined): string {
 function Track({ data, playerId, name, pct, ticks, t0, t1 }: TrackProps) {
   const samples = (data.samples[playerId] ?? []).filter((s) => s[0] >= t0 && s[0] <= t1);
   const turns = data.turns.filter((t) => t.playerId === playerId);
+  const truths = data.mode === 'truths';
   const isImposter = data.imposterId === playerId;
-  const isAccused = data.verdict?.accusedId === playerId;
+  const isAccused = data.verdict?.mode !== 'truths' && data.verdict?.accusedId === playerId;
+  // Two Truths and a Lie: the answer they lied on, and the one the detective picked.
+  const lie = data.lies?.[playerId];
+  const pick = data.verdict?.mode === 'truths' ? data.verdict.picks.find((p) => p.playerId === playerId) : undefined;
+  const marks = (seq: number | undefined) =>
+    seq === undefined ? [] : [...(seq === lie ? ['The lie'] : []), ...(seq === pick?.picked ? ['Detective’s pick'] : [])];
   const x = (t: number) => (pct(t) / 100) * TRACE_W;
 
   const path = (value: (s: RoundSample) => number | null, min: number, max: number, top: number, height: number) => {
@@ -219,9 +232,18 @@ function Track({ data, playerId, name, pct, ticks, t0, t1 }: TrackProps) {
       <div className="track-who">
         <span className="track-name">{name}</span>
         <div className="track-tags">
-          {isImposter && <span className="tag imposter">Imposter</span>}
-          {isAccused && <span className="tag accused">Accused</span>}
-          {!isImposter && <span className="tag">Innocent</span>}
+          {truths ? (
+            <>
+              {lie && <span className="tag">Lied on Q{lie}</span>}
+              {pick && <span className={`tag ${pick.correct ? 'imposter' : 'accused'}`}>{pick.correct ? 'Lie found' : `Picked Q${pick.picked}`}</span>}
+            </>
+          ) : (
+            <>
+              {isImposter && <span className="tag imposter">Imposter</span>}
+              {isAccused && <span className="tag accused">Accused</span>}
+              {!isImposter && <span className="tag">Innocent</span>}
+            </>
+          )}
         </div>
       </div>
 
@@ -239,7 +261,10 @@ function Track({ data, playerId, name, pct, ticks, t0, t1 }: TrackProps) {
           return (
             <Fragment key={turn.id}>
               <span className="band-q" style={{ left: `${qLeft}%`, width: `${qWidth}%` }} />
-              <span className={`band-a ${spike ? 'spike' : ''}`} style={{ left: `${aLeft}%`, width: `${aWidth}%` }} />
+              <span
+                className={`band-a ${spike ? 'spike' : ''} ${turn.kind === 'question' && turn.seq === lie ? 'lie' : ''}`}
+                style={{ left: `${aLeft}%`, width: `${aWidth}%` }}
+              />
               <span className="band-label" title={turn.question} style={{ left: `${qLeft}%`, width: `${qWidth}%` }}>
                 <b>{i + 1}</b> {turn.question}
               </span>
@@ -275,13 +300,23 @@ function Track({ data, playerId, name, pct, ticks, t0, t1 }: TrackProps) {
       {windows.length > 0 && (
         <ol className="said-list">
           {windows.map(({ turn, said, answer, spike }, i) => (
-            <li key={turn.id} className={`said-card ${spike ? 'spike' : ''}`}>
+            <li key={turn.id} className={`said-card ${spike ? 'spike' : ''} ${turn.kind === 'question' && turn.seq === lie ? 'lie' : ''}`}>
               <p className="said-q">
                 <b>{i + 1}</b>
                 <span>
-                  {KIND_LABEL[turn.kind]} · {turn.question}
+                  {turn.kind === 'question' && turn.seq ? `Question ${turn.seq}` : KIND_LABEL[turn.kind]}
+                  {turn.kind === 'followup' && turn.about ? ` on question ${turn.about}` : ''} · {turn.question}
                 </span>
               </p>
+              {turn.kind === 'question' && marks(turn.seq).length > 0 && (
+                <p className="said-marks">
+                  {marks(turn.seq).map((m) => (
+                    <span key={m} className={`tag ${m === 'The lie' ? 'imposter' : 'accused'}`}>
+                      {m}
+                    </span>
+                  ))}
+                </p>
+              )}
               <p className={`said-a ${said ? '' : 'none'}`}>{said ? <>“{withFillers(said)}”</> : 'No answer heard.'}</p>
               <p className="said-meta">
                 {answerFacts(answer).map((fact) => (

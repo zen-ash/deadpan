@@ -17,7 +17,7 @@ import {
   type VisionStats,
 } from '@deadpan/shared';
 import { FACE_LANDMARK_COUNT } from '@deadpan/shared/face';
-import { ImposterGame } from './game';
+import { Game } from './game';
 import { broadcast, recordSample, recordSpeech, send, sendLive, sendToHosts, type Player, type Room } from './room';
 
 type Conn =
@@ -53,7 +53,7 @@ function getRoom(code: string): Room {
   let room = rooms.get(code);
   if (!room) {
     const created = { code, players: new Map(), hosts: new Set(), cameraHosts: new Set() } as Omit<Room, 'game'> as Room;
-    created.game = new ImposterGame(created);
+    created.game = new Game(created);
     rooms.set(code, created);
     room = created;
     console.log(`[room ${code}] created`);
@@ -358,7 +358,7 @@ function handleMessage(ws: WebSocket, conn: Conn, msg: ClientToServer | HostToSe
 
     case 'start_round':
       if (conn.role === 'host') {
-        const error = conn.room.game.start();
+        const error = conn.room.game.start(msg.mode === 'truths' ? 'truths' : 'imposter');
         if (error) sendError(ws, 'not_ready', error);
       }
       return conn;
